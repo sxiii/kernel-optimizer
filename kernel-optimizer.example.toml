@@ -1,0 +1,14 @@
+source = "linux"
+version = "stable"
+local_version = "-ko"
+jobs = 16
+config_base = "current"
+compiler = "gcc"
+optimization = "native"
+use_mold = false
+ccache = true
+build_dir = "/var/tmp/kernel-optimizer/build"
+stage_dir = "/var/tmp/kernel-optimizer/stage"
+enable_lto = false
+enable_bpf = true
+menuconfig = false
