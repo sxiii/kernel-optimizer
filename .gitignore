@@ -1,0 +1,3 @@
+/target
+/kernel-optimizer.toml
+*.log
