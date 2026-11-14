@@ -18,13 +18,26 @@ pub struct CpuInfo {
 pub struct BlockDevice {
     pub name: String, pub kind: String, pub size: String, pub model: String,
     pub transport: String, pub rotational: Option<bool>, pub scheduler: String,
+    pub media_type: String,
+}
+#[derive(Debug, Serialize, Clone)]
+pub struct CpuFreqPolicy {
+    pub name: String,
+    pub affected_cpus: String,
+    pub governor: String,
+    pub available_governors: Vec<String>,
+    pub energy_performance_preference: Option<String>,
+    pub min_frequency_mhz: Option<f64>,
+    pub max_frequency_mhz: Option<f64>,
+    pub current_frequency_mhz: Option<f64>,
 }
 #[derive(Debug, Serialize, Clone)]
 pub struct HardwareProfile {
     pub kernel_release: String, pub architecture: String, pub cpu: CpuInfo,
     pub memory_kib: u64, pub virtualization: String, pub block_devices: Vec<BlockDevice>,
     pub gpus: Vec<String>, pub network_controllers: Vec<String>,
-    pub power_governors: Vec<String>, pub current_cmdline: String,
+    pub power_governors: Vec<String>, pub cpu_frequency_policies: Vec<CpuFreqPolicy>,
+    pub current_cmdline: String,
 }
 fn read(path: impl AsRef<Path>) -> String { fs::read_to_string(path).unwrap_or_default() }
 fn cmd(program: &str, args: &[&str]) -> String {
@@ -64,12 +77,28 @@ fn block_devices() -> Vec<BlockDevice> {
             let name = item["name"].as_str().unwrap_or("?").to_owned();
             let path = format!("/sys/block/{name}");
             let scheduler = read(format!("{path}/queue/scheduler")).trim().to_owned();
+            let kind = item["type"].as_str().unwrap_or("?").to_owned();
+            let transport = item["tran"].as_str().unwrap_or("").to_owned();
+            let rotational = item["rota"].as_u64().map(|v| v != 0);
+            let media_type = if kind != "disk" {
+                "partition or virtual volume".to_owned()
+            } else if name.starts_with("nvme") || transport.eq_ignore_ascii_case("nvme") {
+                "NVMe".to_owned()
+            } else if rotational == Some(true) {
+                "rotational HDD".to_owned()
+            } else if rotational == Some(false) && transport.eq_ignore_ascii_case("sata") {
+                "SATA SSD".to_owned()
+            } else if rotational == Some(false) {
+                "non-rotational block device".to_owned()
+            } else {
+                "unknown".to_owned()
+            };
             out.push(BlockDevice {
-                name, kind: item["type"].as_str().unwrap_or("?").into(),
-                size: item["size"].as_str().unwrap_or("?").into(),
+                name, kind,
+                size: item["size"].as_str().map(str::to_owned).unwrap_or_else(|| item["size"].to_string()),
                 model: item["model"].as_str().unwrap_or("").trim().into(),
-                transport: item["tran"].as_str().unwrap_or("").into(),
-                rotational: item["rota"].as_u64().map(|v| v != 0), scheduler,
+                transport,
+                rotational, scheduler, media_type,
             });
             walk(&item["children"], out);
         }
@@ -83,6 +112,35 @@ fn memory_kib() -> u64 {
 fn controller_lines(class: &str) -> Vec<String> {
     cmd("lspci", &["-nn"]).lines().filter(|line| line.to_lowercase().contains(class))
         .map(str::to_owned).collect()
+}
+fn frequency_mhz(path: &Path) -> Option<f64> {
+    fs::read_to_string(path).ok()?.trim().parse::<f64>().ok().map(|khz| khz / 1000.0)
+}
+fn cpu_frequency_policies() -> Vec<CpuFreqPolicy> {
+    let mut policies = Vec::new();
+    let Ok(entries) = fs::read_dir("/sys/devices/system/cpu/cpufreq") else {
+        return policies;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("policy") {
+            continue;
+        }
+        let path = entry.path();
+        let available = read(path.join("scaling_available_governors"));
+        let epp = read(path.join("energy_performance_preference"));
+        policies.push(CpuFreqPolicy {
+            name,
+            affected_cpus: read(path.join("affected_cpus")).trim().to_owned(),
+            governor: read(path.join("scaling_governor")).trim().to_owned(),
+            available_governors: available.split_whitespace().map(str::to_owned).collect(),
+            energy_performance_preference: if epp.trim().is_empty() { None } else { Some(epp.trim().to_owned()) },
+            min_frequency_mhz: frequency_mhz(&path.join("cpuinfo_min_freq")),
+            max_frequency_mhz: frequency_mhz(&path.join("cpuinfo_max_freq")),
+            current_frequency_mhz: frequency_mhz(&path.join("scaling_cur_freq")),
+        });
+    }
+    policies
 }
 fn power_governors() -> Vec<String> {
     let mut out = Vec::new();
@@ -117,7 +175,8 @@ pub fn detect() -> HardwareProfile {
         memory_kib: memory_kib(), virtualization: if virt.is_empty() { "none".into() } else { virt },
         block_devices: block_devices(), gpus: controller_lines("vga").into_iter().chain(controller_lines("3d controller")).collect(),
         network_controllers: controller_lines("ethernet").into_iter().chain(controller_lines("network controller")).collect(),
-        power_governors: power_governors(), current_cmdline: read("/proc/cmdline").trim().into(),
+        power_governors: power_governors(), cpu_frequency_policies: cpu_frequency_policies(),
+        current_cmdline: read("/proc/cmdline").trim().into(),
     }
 }
 #[cfg(test)]
