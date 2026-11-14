@@ -214,6 +214,24 @@ fn write_atomic(path: &str, contents: &str) -> Result<()> {
     Ok(())
 }
 
+fn previous_file(path: &str) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("reading existing {}", path)),
+    }
+}
+fn restore_file(path: &str, previous: Option<&str>) -> Result<()> {
+    match previous {
+        Some(contents) => write_atomic(path, contents),
+        None => match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("removing {}", path)),
+        },
+    }
+}
+
 pub fn tune(profile: Workload, dry_run: bool) -> Result<()> {
     let (sysctl, notes) = render_sysctl(profile);
     let udev = render_udev();
@@ -222,32 +240,35 @@ pub fn tune(profile: Workload, dry_run: bool) -> Result<()> {
     if dry_run { println!("Dry run: no system files changed."); return Ok(()); }
     if !is_root() { bail!("applying system tuning requires root; rerun with sudo (or use --dry-run)"); }
 
+    let previous_sysctl = previous_file(SYSCTL_PATH)?;
+    let previous_udev = previous_file(UDEV_PATH)?;
     let backup = backup_sysctl()?;
     println!("Saved current sysctl state to {}", backup.display());
+
     write_atomic(SYSCTL_PATH, &sysctl)?;
     if let Err(error) = write_atomic(UDEV_PATH, &udev) {
-        let _ = fs::remove_file(SYSCTL_PATH);
-        return Err(error).context("writing udev rules; removed the sysctl drop-in");
+        restore_file(SYSCTL_PATH, previous_sysctl.as_deref())?;
+        return Err(error).context("writing udev rules; restored the previous sysctl drop-in");
     }
 
-    // sysctl -e tolerates keys unavailable in this kernel. If reload fails, remove our
-    // drop-in and reload the previous configuration to avoid leaving a partial state.
+    // sysctl -e tolerates keys unavailable in this kernel. Restore the exact previous
+    // managed files if the reload cannot be started or reports failure.
     let status = match Command::new("sysctl").args(["-e", "-p", SYSCTL_PATH]).status() {
         Ok(status) => status,
         Err(error) => {
-            let _ = fs::remove_file(SYSCTL_PATH);
-            let _ = fs::remove_file(UDEV_PATH);
+            restore_file(SYSCTL_PATH, previous_sysctl.as_deref())?;
+            restore_file(UDEV_PATH, previous_udev.as_deref())?;
             let _ = Command::new("sysctl").arg("--system").status();
             let _ = Command::new("udevadm").args(["control", "--reload-rules"]).status();
-            return Err(error).context("starting sysctl reload; removed optimizer drop-ins");
+            return Err(error).context("starting sysctl reload; restored previous optimizer drop-ins");
         }
     };
     if !status.success() {
-        let _ = fs::remove_file(SYSCTL_PATH);
-        let _ = fs::remove_file(UDEV_PATH);
+        restore_file(SYSCTL_PATH, previous_sysctl.as_deref())?;
+        restore_file(UDEV_PATH, previous_udev.as_deref())?;
         let _ = Command::new("sysctl").arg("--system").status();
         let _ = Command::new("udevadm").args(["control", "--reload-rules"]).status();
-        bail!("sysctl reload failed; removed our drop-in and attempted to restore system defaults");
+        bail!("sysctl reload failed; restored previous optimizer drop-ins and reloaded system settings");
     }
     let _ = Command::new("udevadm").args(["control", "--reload-rules"]).status();
     println!("Applied. Reboot is not required for sysctl values; scheduler rules apply to future device events.");
