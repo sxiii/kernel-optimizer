@@ -43,6 +43,15 @@ fn detect_virtualization() -> String {
     let detected = command_output("systemd-detect-virt", &[]);
     if detected.is_empty() { "none".into() } else { detected }
 }
+fn supports_extended_swappiness() -> bool {
+    let release = command_output("uname", &["-r"]);
+    let mut parts = release.split('.').filter_map(|part| {
+        part.split(|character: char| !character.is_ascii_digit())
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+    });
+    matches!((parts.next(), parts.next()), (Some(major), Some(minor)) if major > 5 || (major == 5 && minor >= 8))
+}
 fn mem_total_kib() -> u64 {
     read("/proc/meminfo").lines().find(|l| l.starts_with("MemTotal:"))
         .and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok()).unwrap_or(0)
@@ -65,8 +74,10 @@ fn render_sysctl(profile: Workload) -> (String, Vec<String>) {
 
     // Swappiness is workload dependent: compressed RAM swap should be used more readily.
     if zram {
+        // Linux 5.8 raised the accepted swappiness range from 0-100 to 0-200.
+        let swappiness = if supports_extended_swappiness() { 150 } else { 100 };
         out.push_str("# ZRAM: encourage reclaim into compressed RAM; disk-swap tuning is inappropriate here.\n");
-        out.push_str("vm.swappiness = 150\nvm.page-cluster = 0\n");
+        out.push_str(&format!("vm.swappiness = {swappiness}\nvm.page-cluster = 0\n"));
     } else {
         out.push_str("# Disk swap: conservative swappiness avoids unnecessary paging on typical desktop/server systems.\n");
         let swappiness = match profile { Workload::Server => 10, Workload::Laptop => 30, Workload::Desktop => 20, Workload::Gaming => 10 };
@@ -176,7 +187,7 @@ fn render_udev() -> String {
 }
 
 fn unique_backup_path() -> PathBuf {
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     PathBuf::from(format!("/var/backups/kernel-optimizer-sysctl-{stamp}-{}.conf", std::process::id()))
 }
 fn backup_sysctl() -> Result<PathBuf> {
