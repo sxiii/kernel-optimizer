@@ -90,7 +90,7 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     let archive=p.build_dir.join(format!("linux-{}.tar.xz",p.version));
     let url=format!("https://cdn.kernel.org/pub/linux/kernel/v{}.x/linux-{}.tar.xz",p.version.split('.').next().unwrap(),p.version);
     println!("Kernel: {}{}",p.version,p.local_version);
-    println!("CPU: {}",hardware().cpu_model);
+    println!("CPU: {}",hardware::detect().cpu.model);
     println!("Jobs: {}",p.jobs);
     println!("Compiler: {} (ccache: {}, mold requested: {})",p.compiler,p.ccache,p.use_mold);
     println!("Optimization profile: {} (currently informational; no unsafe CPU-specific flags injected)",p.optimization);
