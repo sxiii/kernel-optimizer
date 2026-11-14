@@ -991,12 +991,23 @@ fn finalize(profile_path: &Path, version_override: Option<&str>) -> Result<()> {
     let archive_url = format!("https://cdn.kernel.org/pub/linux/kernel/v{major}.x/linux-{version}.tar.xz");
     let signature_url = format!("https://cdn.kernel.org/pub/linux/kernel/v{major}.x/linux-{version}.tar.sign");
 
-    // Re-verify the cached signature now. Hashes are checked before and after
+    // A previous build may have completed compilation but stopped before its
+    // metadata step, and the small detached signature may have been removed.
+    // Fetch it from the same kernel.org release directory if missing/empty;
+    // cryptographic verification against the pinned signer allowlist remains
+    // mandatory before any recovered provenance is written.
+    if !signature.is_file() || fs::metadata(&signature)?.len() == 0 {
+        println!("Detached signature is missing; downloading the official kernel.org signature.");
+        download_signature(&signature, &signature_url)
+            .with_context(|| format!("downloading detached signature from {signature_url}"))?;
+    }
+
+    // Re-verify the signature now. Hashes are checked before and after
     // verification to detect replacement while the archive is being read.
     let archive_sha256_before = provenance::sha256_file(&archive)
         .with_context(|| format!("reading cached source archive {}", archive.display()))?;
     let signature_sha256_before = provenance::sha256_file(&signature)
-        .with_context(|| format!("reading cached detached signature {}", signature.display()))?;
+        .with_context(|| format!("reading detached signature {}", signature.display()))?;
     let signature_verification =
         provenance::verify_kernel_archive(&archive, &signature, p.gpg_home.as_deref())?;
     let archive_sha256 = provenance::sha256_file(&archive)?;
@@ -1059,7 +1070,7 @@ fn finalize(profile_path: &Path, version_override: Option<&str>) -> Result<()> {
             "make kernelrelease (validation only; no compilation)".into(),
             "verify staged kernel image against the build-tree image SHA-256".into(),
             "verify staged config and System.map against the build-tree files".into(),
-            "re-verify the cached kernel.org detached source signature".into(),
+            "download the kernel.org detached signature if missing, then re-verify it against the pinned signer allowlist".into(),
             "hash the staged modules tree".into(),
         ],
         profile: recorded_profile,
