@@ -105,8 +105,8 @@ atomically. Before applying, it saves the current `sysctl -a` output under
 
 | Setting | Behavior | Trade-off / limitation |
 |---|---|---|
-| `vm.swappiness` | Active zram swap: 150 and `vm.page-cluster=0`; otherwise profile-dependent conservative values | No universal optimum; zram is detected from active entries in `/proc/swaps` |
-| `vm.min_free_kbytes` | Approximately 1% RAM, bounded to 64-512 MiB; skipped in detected virtualization | Larger reserves reduce memory available to applications; value is a heuristic |
+| `vm.swappiness` | Active zram swap: 150 on Linux 5.8+ (100 on older kernels) and `vm.page-cluster=0`; otherwise profile-dependent conservative values | No universal optimum; zram is detected from active entries in `/proc/swaps` |
+| `vm.min_free_kbytes` | Approximately 1% RAM, bounded to 64-512 MiB; skipped below 4 GiB RAM and in detected virtualization | Larger reserves reduce memory available to applications; value is a heuristic |
 | MGLRU | Reports whether `/sys/kernel/mm/lru_gen/enabled` exists and its current value | MGLRU is a runtime sysfs interface, not sysctl; this version deliberately does not change it automatically |
 | TCP BBR | Enables BBR plus `fq` only when the running kernel lists `bbr` in `tcp_available_congestion_control` | Does not load modules or guess BBRv2/v3; the kernel's advertised implementation is used |
 | I/O schedulers | Generates udev rules only for scheduler names exposed by the running kernel | Rules affect matching devices on add/change; NVMe, SATA/SAS and virtual devices differ by driver |
@@ -204,3 +204,32 @@ requires matching workload parameters before comparing each metric. A higher thr
 number is better, but results remain sensitive to temperature, power limits, background
 load, storage cache and network conditions. Repeat tests and compare medians; do not treat
 small differences as statistically meaningful.
+
+
+## Interactive terminal dashboard
+
+```sh
+kernel-optimizer tui
+kernel-optimizer tui --profile laptop
+kernel-optimizer tui --profile server
+```
+
+The Ratatui dashboard is read-only. Use `1` / `2` or `Tab` to switch between
+hardware inventory and recommendations, arrow keys or PageUp/PageDown to scroll,
+and `q` or `Esc` to exit. It does not apply sysctl values, change CPU governors,
+edit kernel configuration, or run privileged commands.
+
+## Kernel build staging verification
+
+After compiling, the build pipeline runs `make kernelrelease`, locates the matching
+staged kernel image, checks that it is non-empty, computes its SHA-256 digest, and
+records the image name, release, digest and module-staging status in
+`BUILD-METADATA.txt`. If more than one image exists and the newly built release
+cannot be identified, verification fails rather than silently selecting an older
+image. A checksum detects accidental corruption; it is not a signature or proof
+of source authenticity.
+
+The build remains staged outside the live boot path. Initramfs generation,
+distribution package creation, module signing, Secure Boot enrollment, bootloader
+entry creation and rollback integration are not yet automated. Keep a known-good
+boot entry and review the staged image before installing it.
