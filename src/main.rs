@@ -4,7 +4,7 @@ mod tuning;
 use tuning::Workload;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::{Path, PathBuf}, process::{Command, Stdio}, time::Duration};
+use std::{fs, path::{Path, PathBuf}, process::Command, time::Duration};
 
 #[derive(Parser)]
 #[command(name="kernel-optimizer", version, about="Hardware-aware Linux kernel builder")]
@@ -103,7 +103,7 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     let url=format!("https://cdn.kernel.org/pub/linux/kernel/v{}.x/linux-{}.tar.xz",p.version.split('.').next().unwrap(),p.version);
     println!("Kernel: {}{}",p.version,p.local_version);
     println!("CPU: {}",hardware().cpu_model);
-    println!("Jobs: {}",p.jobs);
+    println!("Jobs: {}",p.jobs);\n    println!("Compiler: {} (ccache: {}, mold requested: {})",p.compiler,p.ccache,p.use_mold);\n    println!("Optimization profile: {} (currently informational; no unsafe CPU-specific flags injected)",p.optimization);
     println!("Source: {url}");
     println!("Build dir: {}",src.display());
     if dry {println!("Dry run only. No files changed.");return Ok(());}
