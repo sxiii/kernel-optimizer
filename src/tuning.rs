@@ -57,7 +57,7 @@ fn render_sysctl(profile: Workload) -> (String, Vec<String>) {
     let zram = detect_zram();
     let virt = detect_virtualization();
     let mem_kib = mem_total_kib();
-    let min_free = ((mem_kib / 100).clamp(64 * 1024, 512 * 1024)).min(u64::MAX);
+    let min_free = (mem_kib / 100).clamp(64 * 1024, 512 * 1024);
     let mut notes = vec![
         format!("Workload profile: {}", profile.label()),
         format!("Memory: {:.1} GiB", mem_kib as f64 / 1024.0 / 1024.0),
