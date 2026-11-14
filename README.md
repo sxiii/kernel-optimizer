@@ -308,8 +308,12 @@ edit kernel configuration, or run privileged commands.
 
 Before extracting or compiling, the builder verifies the detached signature against
 the pinned kernel.org signer fingerprints and records the source archive and
-signature SHA-256 hashes. After compiling, it runs `make kernelrelease`, locates
-the matching staged kernel image, hashes the effective `.config`, image,
+signature SHA-256 hashes. After compiling, it runs `make kernelrelease` and copies
+the architecture-specific kernel image, `.config` and `System.map` directly into
+the staging boot directory. It deliberately does not run `make install`: distribution
+`installkernel` / `kernel-install` hooks can invoke dracut against the live host's
+`/lib/modules` directory, which is not where this staged build's modules reside.
+The builder then locates the matching staged kernel image and hashes the effective `.config`, image,
 `System.map` (when present), and staged modules tree, and writes both
 `BUILD-METADATA.txt` and a machine-readable `provenance.json`.
 
