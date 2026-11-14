@@ -305,15 +305,37 @@ pub fn run(report_path: &Path, options: BenchmarkOptions<'_>) -> Result<Benchmar
     Ok(report)
 }
 
-pub fn compare(baseline_path: &Path, candidate_path: &Path) -> Result<String> {
-    let baseline: BenchmarkReport =
-        serde_json::from_slice(&fs::read(baseline_path).with_context(|| {
-            format!("reading baseline report {}", baseline_path.display())
-        })?)?;
-    let candidate: BenchmarkReport =
-        serde_json::from_slice(&fs::read(candidate_path).with_context(|| {
-            format!("reading candidate report {}", candidate_path.display())
-        })?)?;
+fn validate_report(report: &BenchmarkReport, label: &str) -> Result<()> {
+    if report.schema_version != 2 {
+        bail!("{label} report uses unsupported schema version {}; expected 2", report.schema_version);
+    }
+    if report.results.is_empty() {
+        bail!("{label} report contains no benchmark results");
+    }
+    let mut names = std::collections::HashSet::new();
+    for result in &report.results {
+        if result.name.trim().is_empty() || !names.insert(result.name.as_str()) {
+            bail!("{label} report contains an empty or duplicate metric name");
+        }
+        if result.samples.is_empty() || result.iterations != result.samples.len() {
+            bail!("{label} metric '{}' has inconsistent iteration/sample counts", result.name);
+        }
+        if result.samples.iter().any(|sample| !sample.is_finite())
+            || !result.median.is_finite()
+            || !result.min.is_finite()
+            || !result.max.is_finite()
+            || result.min > result.median
+            || result.median > result.max
+        {
+            bail!("{label} metric '{}' contains invalid or inconsistent numeric values", result.name);
+        }
+    }
+    Ok(())
+}
+
+fn compare_reports(baseline: &BenchmarkReport, candidate: &BenchmarkReport) -> Result<String> {
+    validate_report(baseline, "baseline")?;
+    validate_report(candidate, "candidate")?;
 
     let mut output = format!(
         "Baseline kernel: {}\nCandidate kernel: {}\nCPU: {}\n\n",
@@ -332,11 +354,16 @@ pub fn compare(baseline_path: &Path, candidate_path: &Path) -> Result<String> {
     }
 
     output.push_str(&format!(
-        "{:<28} {:>14} {:>14} {:>12} {:>12}\n",
+        "{:<28} {:>14} {:>14} {:>12} {:>20}\n",
         "METRIC", "BASELINE", "CANDIDATE", "CHANGE", "RESULT"
     ));
+    let baseline_names = baseline.results.iter().map(|item| item.name.as_str()).collect::<std::collections::HashSet<_>>();
     for old in &baseline.results {
         let Some(new) = candidate.results.iter().find(|item| item.name == old.name) else {
+            output.push_str(&format!(
+                "{:<28} {:>14.2} {:>14} {:>12} {:>20}\n",
+                old.name, old.median, "--", "--", "missing from candidate"
+            ));
             continue;
         };
         if old.unit != new.unit
@@ -346,16 +373,22 @@ pub fn compare(baseline_path: &Path, candidate_path: &Path) -> Result<String> {
             output.push_str(&format!("{:<28} incompatible report metadata\n", old.name));
             continue;
         }
-        let change = if old.median.abs() < f64::EPSILON {
-            0.0
-        } else {
-            (new.median / old.median - 1.0) * 100.0
-        };
-        let improved = if old.higher_is_better {
-            change > 0.0
-        } else {
-            change < 0.0
-        };
+        if old.median.abs() < f64::EPSILON {
+            if new.median.abs() < f64::EPSILON {
+                output.push_str(&format!(
+                    "{:<28} {:>11.2} {:>11.2} {:>+10.2}% {:>20}\n",
+                    old.name, old.median, new.median, 0.0, "similar"
+                ));
+            } else {
+                output.push_str(&format!(
+                    "{:<28} {:>11.2} {:>11.2} {:>10} {:>20}\n",
+                    old.name, old.median, new.median, "n/a", "zero baseline"
+                ));
+            }
+            continue;
+        }
+        let change = (new.median / old.median - 1.0) * 100.0;
+        let improved = if old.higher_is_better { change > 0.0 } else { change < 0.0 };
         let result = if change.abs() < 0.5 {
             "similar"
         } else if improved {
@@ -364,9 +397,17 @@ pub fn compare(baseline_path: &Path, candidate_path: &Path) -> Result<String> {
             "regressed"
         };
         output.push_str(&format!(
-            "{:<28} {:>11.2} {:>11.2} {:>+10.2}% {:>12}\n",
+            "{:<28} {:>11.2} {:>11.2} {:>+10.2}% {:>20}\n",
             old.name, old.median, new.median, change, result
         ));
+    }
+    for new in &candidate.results {
+        if !baseline_names.contains(new.name.as_str()) {
+            output.push_str(&format!(
+                "{:<28} {:>14} {:>14.2} {:>12} {:>20}\n",
+                new.name, "--", new.median, "--", "candidate-only metric"
+            ));
+        }
     }
     output.push_str(
         "\nHigher throughput is better. Repeat tests under comparable thermal, power and background-load conditions before drawing conclusions.\n",
@@ -374,9 +415,83 @@ pub fn compare(baseline_path: &Path, candidate_path: &Path) -> Result<String> {
     Ok(output)
 }
 
+pub fn compare(baseline_path: &Path, candidate_path: &Path) -> Result<String> {
+    let baseline: BenchmarkReport =
+        serde_json::from_slice(&fs::read(baseline_path).with_context(|| {
+            format!("reading baseline report {}", baseline_path.display())
+        })?)?;
+    let candidate: BenchmarkReport =
+        serde_json::from_slice(&fs::read(candidate_path).with_context(|| {
+            format!("reading candidate report {}", candidate_path.display())
+        })?)?;
+    compare_reports(&baseline, &candidate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    fn test_report(results: Vec<BenchmarkResult>) -> BenchmarkReport {
+        BenchmarkReport {
+            schema_version: 2,
+            created_unix: 0,
+            kernel: "test-kernel".into(),
+            architecture: "x86_64".into(),
+            cpu: "test-cpu".into(),
+            cpu_microarchitecture: "test-arch".into(),
+            logical_cpus: 8,
+            memory_kib: 1024,
+            cpu_governors: vec!["policy0:performance".into()],
+            profile: "test".into(),
+            results,
+        }
+    }
+
+    fn test_result(name: &str, median: f64, workload: &str) -> BenchmarkResult {
+        BenchmarkResult {
+            name: name.into(),
+            workload: workload.into(),
+            unit: "MiB/s".into(),
+            higher_is_better: true,
+            iterations: 3,
+            samples: vec![median, median, median],
+            median,
+            min: median,
+            max: median,
+        }
+    }
+
+    #[test]
+    fn compare_reports_lists_metrics_missing_from_candidate() {
+        let baseline = test_report(vec![test_result("disk", 100.0, "fio")]);
+        let candidate = test_report(vec![test_result("memory", 200.0, "copy")]);
+        let output = compare_reports(&baseline, &candidate).unwrap();
+        assert!(output.contains("missing from candidate"));
+        assert!(output.contains("candidate-only metric"));
+    }
+
+    #[test]
+    fn compare_reports_does_not_divide_by_zero_baseline() {
+        let baseline = test_report(vec![test_result("disk", 0.0, "fio")]);
+        let candidate = test_report(vec![test_result("disk", 10.0, "fio")]);
+        let output = compare_reports(&baseline, &candidate).unwrap();
+        assert!(output.contains("zero baseline"));
+        assert!(output.contains("n/a"));
+    }
+
+    #[test]
+    fn compare_reports_rejects_unknown_schema_and_invalid_samples() {
+        let mut baseline = test_report(vec![test_result("disk", 10.0, "fio")]);
+        baseline.schema_version = 1;
+        let candidate = test_report(vec![test_result("disk", 11.0, "fio")]);
+        assert!(compare_reports(&baseline, &candidate).is_err());
+
+        let mut invalid = test_result("disk", 10.0, "fio");
+        invalid.samples.clear();
+        let bad = test_report(vec![invalid]);
+        assert!(compare_reports(&candidate, &bad).is_err());
+    }
 
     #[test]
     fn median_handles_odd_and_even_samples() {

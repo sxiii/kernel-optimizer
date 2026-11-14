@@ -6,17 +6,34 @@ A Rust CLI prototype for inspecting Linux hardware, discovering the current upst
 
 ## Status
 
-This is the first usable milestone, not yet the complete GUI/installer envisioned for the project.
+The current milestone is a read-only hardware advisor, a conservative system-tuning tool,
+a repeatable benchmark/report workflow, and an upstream kernel build-and-stage prototype.
+The running kernel and bootloader are not modified by the build command.
 
-- [x] Hardware inventory: CPU model/features, architecture, logical CPUs, RAM, PCI devices, block devices, current kernel and virtualization.
-- [x] Kernel.org stable version discovery.
-- [x] Configurable profile (source, version, config base, compiler, jobs, LTO/BPF preferences, paths).
-- [x] Upstream kernel download, archive integrity check, config and compilation.
-- [x] Stage modules and boot artifacts outside the host.
-- [ ] Adapters for linux-zen, CachyOS, TKG, RT and distro kernel packaging.
-- [ ] Post-build kernel/module verification and signing.
-- [ ] Safe integration with GRUB/systemd-boot and boot-entry rollback.
-- [ ] TUI/GUI.
+**Implemented**
+
+- [x] Hardware inventory and workload-aware, read-only recommendations.
+- [x] Interactive read-only terminal dashboard.
+- [x] Upstream stable kernel discovery, configurable build profiles, and staged builds.
+- [x] Staged kernel image verification and SHA-256 build metadata.
+- [x] Read-only build preflight (doctor) for dependencies, config source and disk space.
+- [x] Workload-aware sysctl/I/O-scheduler preview, apply and revert.
+- [x] CPU, memory, optional fio/iperf3 benchmarks and report comparison.
+- [x] Automated unit tests and CI lint/test checks.
+
+**Next**
+
+- [ ] Add broader hardware-independent tests for build staging, tuning rollback and benchmark edge cases.
+- [ ] Verify downloaded kernel source against upstream signatures/checksums and record provenance.
+- [ ] Add distro packaging adapters (Arch/Garuda first) that produce installable packages without changing the boot path.
+- [ ] Add initramfs, module-signing and Secure Boot preflight/integration.
+- [ ] Add boot-entry creation only with a known-good fallback and tested rollback.
+- [ ] Test builds and tuning behavior across multiple distributions and kernel configurations.
+- [ ] Add additional kernel source adapters (linux-zen, CachyOS, TKG and PREEMPT_RT) after their patch/config provenance is defined.
+
+The install subcommand is intentionally disabled. Package installation and bootloader
+mutation remain separate future milestones; a staged image is not an installable or
+bootable system by itself.
 
 ## Requirements
 
@@ -40,6 +57,7 @@ sudo install -Dm755 target/release/kernel-optimizer /usr/local/bin/kernel-optimi
 ```sh
 kernel-optimizer inspect
 kernel-optimizer sources
+kernel-optimizer doctor
 kernel-optimizer profile --create
 kernel-optimizer profile
 kernel-optimizer build --dry-run

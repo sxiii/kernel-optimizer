@@ -56,6 +56,8 @@ enum Commands {
         #[arg(long)]
         candidate: PathBuf,
     },
+    /// Run a read-only pre-build environment and profile check.
+    Doctor { #[arg(long, default_value="kernel-optimizer.toml")] profile: PathBuf },
     /// Create or print an example build profile.
     Profile { #[arg(long, default_value="kernel-optimizer.toml")] file: PathBuf, #[arg(long)] create: bool },
     /// Fetch, configure, compile and stage a kernel. Installation requires a separate explicit step.
@@ -64,7 +66,7 @@ enum Commands {
     Tune { #[arg(long, value_enum, default_value="desktop")] profile: Workload, #[arg(long)] dry_run: bool },
     /// Remove optimizer-managed sysctl and udev drop-ins.
     Revert { #[arg(long)] dry_run: bool },
-    /// Install a previously staged kernel through the detected package/boot integration.
+    /// Reserved: installation stays disabled until package and rollback adapters are available.
     Install { #[arg(long)] staged: Option<PathBuf>, #[arg(long)] yes: bool },
 }
 
@@ -242,14 +244,95 @@ fn verify_staged_kernel(stage: &Path, release: &str) -> Result<(String, String, 
     ))
 }
 
+fn validate_profile(p: &Profile) -> Result<()> {
+    if !(1..=4096).contains(&p.jobs) { bail!("jobs must be between 1 and 4096"); }
+    if p.source != "linux" { bail!("source '{}' is not supported by the safe builder yet; use source=linux", p.source); }
+    if p.version != "stable" && !Regex::new(r"^\d+\.\d+(\.\d+)?$")?.is_match(&p.version) { bail!("invalid kernel version: {}", p.version); }
+    if p.local_version.contains('/') || p.local_version.contains(' ') || p.local_version.contains('\n') { bail!("local_version may not contain slash, spaces or newlines"); }
+    if !matches!(p.config_base.as_str(), "current" | "defconfig") { bail!("unsupported config_base '{}' (use current or defconfig)", p.config_base); }
+    if !matches!(p.compiler.as_str(), "gcc" | "clang") { bail!("unsupported compiler {}; use gcc or clang", p.compiler); }
+    if p.build_dir == p.stage_dir { bail!("build_dir and stage_dir must be different directories"); }
+    Ok(())
+}
+
+fn command_available(program: &str) -> bool {
+    Command::new(program).arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().is_ok()
+}
+
+fn nearest_existing_path(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path;
+    loop {
+        if candidate.exists() { return Some(candidate.to_path_buf()); }
+        candidate = candidate.parent()?;
+    }
+}
+
+fn available_gib(path: &Path) -> Option<f64> {
+    let existing = nearest_existing_path(path)?;
+    let output = Command::new("df").args(["-Pk"]).arg(existing).output().ok()?;
+    if !output.status.success() { return None; }
+    let line = String::from_utf8_lossy(&output.stdout).lines().last()?.to_owned();
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let available_kib = fields.get(3)?.parse::<u64>().ok()?;
+    Some(available_kib as f64 / 1024.0 / 1024.0)
+}
+
+fn doctor(profile_path: &Path) -> Result<()> {
+    let (p, profile_loaded) = if profile_path.is_file() {
+        (toml::from_str::<Profile>(&fs::read_to_string(profile_path).with_context(|| format!("reading {}", profile_path.display()))?)?, true)
+    } else {
+        (Profile::default(), false)
+    };
+    validate_profile(&p).context("invalid build profile")?;
+
+    println!("Kernel build preflight (read-only)\nProfile: {}", if profile_loaded { profile_path.display().to_string() } else { "built-in defaults".into() });
+    let mut failures = 0usize;
+    let mut warnings = 0usize;
+    let required = ["make", "curl", "xz", "tar", "bc", "bison", "flex", "perl", "python3"];
+    for tool in required {
+        if command_available(tool) { println!("[ ok ] {tool} available"); }
+        else { println!("[FAIL] {tool} not found in PATH"); failures += 1; }
+    }
+    if command_available(&p.compiler) { println!("[ ok ] {} compiler available", p.compiler); }
+    else { println!("[FAIL] {} compiler not found in PATH", p.compiler); failures += 1; }
+    if p.ccache {
+        if command_available("ccache") { println!("[ ok ] ccache available (enabled in profile)"); }
+        else { println!("[FAIL] ccache is enabled in the profile but not installed"); failures += 1; }
+    } else if command_available("ccache") { println!("[ ok ] ccache available (not required)"); }
+    if command_available("pahole") { println!("[ ok ] pahole available"); }
+    else { println!("[WARN] pahole missing; BTF-enabled kernel configurations may fail"); warnings += 1; }
+    if Path::new("/usr/include/openssl/ssl.h").is_file() || Path::new("/usr/local/include/openssl/ssl.h").is_file() {
+        println!("[ ok ] OpenSSL development headers found");
+    } else { println!("[WARN] OpenSSL development headers not found in standard include paths"); warnings += 1; }
+
+    let release = output("uname", &["-r"]);
+    let current_config = Path::new("/proc/config.gz").is_file()
+        || PathBuf::from(format!("/boot/config-{release}")).is_file()
+        || PathBuf::from(format!("/lib/modules/{release}/build/.config")).is_file();
+    if p.config_base == "current" && current_config { println!("[ ok ] current kernel config source found"); }
+    else if p.config_base == "current" { println!("[WARN] current kernel config unavailable; build will fall back to defconfig"); warnings += 1; }
+    else { println!("[ ok ] defconfig selected explicitly"); }
+
+    for (label, path, floor) in [("build", &p.build_dir, 20.0_f64), ("stage", &p.stage_dir, 2.0_f64)] {
+        match available_gib(path) {
+            Some(gib) if gib >= floor => println!("[ ok ] {label} filesystem: {gib:.1} GiB available ({})", path.display()),
+            Some(gib) => { println!("[WARN] {label} filesystem has only {gib:.1} GiB free; heuristic recommendation is at least {floor:.0} GiB ({})", path.display()); warnings += 1; }
+            None => { println!("[WARN] unable to determine free space for {label} path {}", path.display()); warnings += 1; }
+        }
+    }
+    if unsafe { libc::geteuid() } == 0 { println!("[WARN] running as root; prefer an unprivileged build user"); warnings += 1; }
+    if !profile_loaded { println!("[INFO] {} not found; checked built-in defaults. Create it with kernel-optimizer profile --create.", profile_path.display()); }
+    println!("\nPreflight summary: {failures} failure(s), {warnings} warning(s).");
+    if failures > 0 { bail!("preflight failed; install the missing build dependencies and run doctor again"); }
+    if warnings > 0 { println!("Review the warnings before starting a long kernel build."); }
+    else { println!("Environment looks ready for a kernel build."); }
+    Ok(())
+}
+
 fn build(profile_path:&Path,dry:bool)->Result<()> {
     let mut p:Profile=toml::from_str(&fs::read_to_string(profile_path)?)?;
-    if p.jobs==0 || p.jobs>4096 {bail!("jobs must be between 1 and 4096");}
-    if p.source!="linux" {bail!("source '{}' is not supported by the safe builder yet; use source=linux",p.source);}
+    validate_profile(&p)?;
     if p.version=="stable" {p.version=latest_stable()?;}
-    let version_re=Regex::new(r"^\d+\.\d+(\.\d+)?$")?;
-    if !version_re.is_match(&p.version){bail!("invalid kernel version: {}",p.version);}
-    if p.local_version.contains('/')||p.local_version.contains(' ') {bail!("local_version may not contain slash or spaces");}
     let src=p.build_dir.join(format!("linux-{}",p.version));
     let archive=p.build_dir.join(format!("linux-{}.tar.xz",p.version));
     let url=format!("https://cdn.kernel.org/pub/linux/kernel/v{}.x/linux-{}.tar.xz",p.version.split('.').next().unwrap(),p.version);
@@ -366,6 +449,7 @@ fn main()->Result<()> {
             print!("{}",benchmark::compare(&baseline,&candidate)?);
         },
         Commands::Sources=>sources(),
+        Commands::Doctor{profile}=>doctor(&profile)?,
         Commands::Profile{file,create}=>profile(&file,create)?,
         Commands::Build{profile,dry_run}=>build(&profile,dry_run)?,
         Commands::Tune{profile,dry_run}=>tuning::tune(profile,dry_run)?,
@@ -376,4 +460,46 @@ fn main()->Result<()> {
         }
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_profile_passes_preflight_validation() {
+        assert!(validate_profile(&Profile::default()).is_ok());
+    }
+
+    #[test]
+    fn profile_validation_rejects_unsupported_compiler_and_sources() {
+        let profile = Profile {
+            compiler: "zig".into(),
+            ..Profile::default()
+        };
+        assert!(validate_profile(&profile).is_err());
+
+        let profile = Profile {
+            source: "linux-zen".into(),
+            ..Profile::default()
+        };
+        assert!(validate_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn profile_validation_rejects_unsafe_local_version_and_shared_paths() {
+        let profile = Profile {
+            local_version: "-custom/../../boot".into(),
+            ..Profile::default()
+        };
+        assert!(validate_profile(&profile).is_err());
+
+        let defaults = Profile::default();
+        let profile = Profile {
+            stage_dir: defaults.build_dir.clone(),
+            ..defaults
+        };
+        assert!(validate_profile(&profile).is_err());
+    }
 }
