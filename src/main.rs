@@ -1,7 +1,9 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 mod tuning;
-use tuning::Workload;\nmod hardware;\nmod benchmark;
+use tuning::Workload;
+mod hardware;
+mod benchmark;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::{Path, PathBuf}, process::Command, time::Duration};
@@ -28,12 +30,6 @@ enum Commands {
     Install { #[arg(long)] staged: Option<PathBuf>, #[arg(long)] yes: bool },
 }
 
-#[derive(Debug, Serialize)]
-struct Hardware {
-    uname: String, architecture: String, cpu_model: String, logical_cpus: usize,
-    cpu_flags: Vec<String>, memory_kib: Option<u64>, pci_devices: Vec<String>,
-    block_devices: Vec<String>, current_cmdline: String, virtualization: String,
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Profile {
     source: String, version: String, local_version: String, jobs: usize,
@@ -145,7 +141,13 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
 fn main()->Result<()> {
     let cli=Cli::parse();
     match cli.command {
-        Commands::Inspect=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),\n        Commands::Hardware=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),\n        Commands::Benchmark{output,iterations,profile}=>{ let report=benchmark::run(&output,iterations,&profile)?; println!("{}",serde_json::to_string_pretty(&report)?); eprintln!("Saved benchmark report to {}",output.display()); },
+        Commands::Inspect=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
+        Commands::Hardware=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
+        Commands::Benchmark{output,iterations,profile}=>{
+            let report=benchmark::run(&output,iterations,&profile)?;
+            println!("{}",serde_json::to_string_pretty(&report)?);
+            eprintln!("Saved benchmark report to {}",output.display());
+        },
         Commands::Sources=>sources(),
         Commands::Profile{file,create}=>profile(&file,create)?,
         Commands::Build{profile,dry_run}=>build(&profile,dry_run)?,
