@@ -105,6 +105,29 @@ fn block_devices() -> Vec<BlockDevice> {
     }
     let mut out = Vec::new(); walk(&value["blockdevices"], &mut out); out
 }
+fn detect_virtualization() -> String {
+    let detected = cmd("systemd-detect-virt", &[]);
+    if !detected.is_empty() && detected != "none" {
+        return detected;
+    }
+    if Path::new("/.dockerenv").exists() {
+        return "docker".into();
+    }
+    if Path::new("/run/.containerenv").exists() {
+        return "podman".into();
+    }
+    let cgroup = read("/proc/1/cgroup").to_lowercase();
+    for marker in ["kubepods", "docker", "containerd", "libpod", "lxc"] {
+        if cgroup.contains(marker) {
+            return "container".into();
+        }
+    }
+    let environment = read("/proc/1/environ");
+    if environment.contains("container=") {
+        return "container".into();
+    }
+    "none".into()
+}
 fn memory_kib() -> u64 {
     read("/proc/meminfo").lines().find(|l| l.starts_with("MemTotal:"))
         .and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok()).unwrap_or(0)
@@ -168,11 +191,11 @@ pub fn detect() -> HardwareProfile {
     let logical = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1);
     let sockets = cpuinfo.lines().filter(|l| l.starts_with("physical id")).filter_map(|l| l.split_once(':').map(|(_,v)|v.trim().to_owned())).collect::<std::collections::HashSet<_>>().len();
     let cores = cpuinfo.lines().filter(|l| l.starts_with("cpu cores")).find_map(|l| l.split_once(':').and_then(|(_,v)|v.trim().parse::<usize>().ok()));
-    let virt = cmd("systemd-detect-virt", &[]);
+    let virt = detect_virtualization();
     HardwareProfile {
         kernel_release: cmd("uname", &["-r"]), architecture: cmd("uname", &["-m"]),
         cpu: CpuInfo { microarchitecture: microarch(&vendor, family.as_deref(), model_id.as_deref()), vendor, model, family, model_id, stepping, logical_cpus: logical, physical_cores: cores.map(|c| c * sockets.max(1)), sockets: if sockets == 0 { None } else { Some(sockets) }, flags },
-        memory_kib: memory_kib(), virtualization: if virt.is_empty() { "none".into() } else { virt },
+        memory_kib: memory_kib(), virtualization: virt,
         block_devices: block_devices(), gpus: controller_lines("vga").into_iter().chain(controller_lines("3d controller")).collect(),
         network_controllers: controller_lines("ethernet").into_iter().chain(controller_lines("network controller")).collect(),
         power_governors: power_governors(), cpu_frequency_policies: cpu_frequency_policies(),
