@@ -152,6 +152,12 @@ fn main()->Result<()> {
             println!("{}",serde_json::to_string_pretty(&report)?);
             eprintln!("Saved benchmark report to {}",output.display());
         },
+        Commands::Hardware=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
+        Commands::Benchmark{output,iterations,profile}=>{
+            let report=benchmark::run(&output,iterations,&profile)?;
+            println!("{}",serde_json::to_string_pretty(&report)?);
+            eprintln!("Saved benchmark report to {}",output.display());
+        },
         Commands::Sources=>sources(),
         Commands::Profile{file,create}=>profile(&file,create)?,
         Commands::Build{profile,dry_run}=>build(&profile,dry_run)?,
