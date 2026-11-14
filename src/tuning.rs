@@ -47,12 +47,6 @@ fn mem_total_kib() -> u64 {
     read("/proc/meminfo").lines().find(|l| l.starts_with("MemTotal:"))
         .and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok()).unwrap_or(0)
 }
-fn scheduler_available(name: &str) -> bool {
-    Path::new("/sys/block").read_dir().ok().into_iter().flatten().flatten().any(|e| {
-        fs::read_to_string(e.path().join("queue/scheduler")).unwrap_or_default()
-            .split_whitespace().any(|s| s.trim_matches(&['[', ']'][..]) == name)
-    })
-}
 
 fn render_sysctl(profile: Workload) -> (String, Vec<String>) {
     let zram = detect_zram();
