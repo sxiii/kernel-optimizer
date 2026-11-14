@@ -280,7 +280,20 @@ pub fn tune(profile: Workload, dry_run: bool) -> Result<()> {
         let _ = Command::new("udevadm").args(["control", "--reload-rules"]).status();
         bail!("sysctl reload failed; restored previous optimizer drop-ins and reloaded system settings");
     }
-    let _ = Command::new("udevadm").args(["control", "--reload-rules"]).status();
+    if udev.contains("ACTION==") {
+        let reload = Command::new("udevadm")
+            .args(["control", "--reload-rules"])
+            .status();
+        if !matches!(reload, Ok(status) if status.success()) {
+            restore_file(SYSCTL_PATH, previous_sysctl.as_deref())?;
+            restore_file(UDEV_PATH, previous_udev.as_deref())?;
+            let _ = Command::new("sysctl").arg("--system").status();
+            let _ = Command::new("udevadm")
+                .args(["control", "--reload-rules"])
+                .status();
+            bail!("udevadm could not reload scheduler rules; restored the previous optimizer drop-ins");
+        }
+    }
     println!("Applied. Reboot is not required for sysctl values; scheduler rules apply to future device events.");
     Ok(())
 }
