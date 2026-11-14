@@ -116,12 +116,15 @@ fn render_sysctl(profile: Workload) -> (String, Vec<String>) {
 }
 
 fn render_udev() -> String {
+    if detect_virtualization() != "none" {
+        return String::from("# Skipped: virtualization/container detected; host I/O scheduler policy is not assumed.\n");
+    }
     let mut rules = String::from("# Managed by kernel-optimizer. Rules only target devices with known queue capabilities.\n");
     rules.push_str("# NVMe: use none when the kernel exposes it.\n");
     rules.push_str("ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"nvme[0-9]*n[0-9]*\", ATTR{queue/scheduler}=\"none\"\n");
     if scheduler_available("mq-deadline") {
         rules.push_str("# Non-rotational SCSI/SATA SSDs: mq-deadline when available.\n");
-        rules.push_str("ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"sd[a-z]\", ATTR{queue/rotational}==\"0\", ATTR{queue/scheduler}=\"mq-deadline\"\n");
+        rules.push_str("ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"sd[a-z]*\", ATTR{queue/rotational}==\"0\", ATTR{queue/scheduler}=\"mq-deadline\"\n");
     }
     if scheduler_available("bfq") {
         rules.push_str("# Rotational disks: BFQ when the running kernel provides it.\n");
@@ -163,7 +166,10 @@ pub fn tune(profile: Workload, dry_run: bool) -> Result<()> {
     let backup = backup_sysctl()?;
     println!("Saved current sysctl state to {}", backup.display());
     write_atomic(SYSCTL_PATH, &sysctl)?;
-    write_atomic(UDEV_PATH, &udev)?;
+    if let Err(error) = write_atomic(UDEV_PATH, &udev) {
+        let _ = fs::remove_file(SYSCTL_PATH);
+        return Err(error).context("writing udev rules; removed the sysctl drop-in");
+    }
 
     // sysctl -e tolerates keys unavailable in this kernel. If reload fails, remove our
     // drop-in and reload the previous configuration to avoid leaving a partial state.
@@ -171,7 +177,9 @@ pub fn tune(profile: Workload, dry_run: bool) -> Result<()> {
         .context("reloading optimizer sysctl drop-in")?;
     if !status.success() {
         let _ = fs::remove_file(SYSCTL_PATH);
+        let _ = fs::remove_file(UDEV_PATH);
         let _ = Command::new("sysctl").arg("--system").status();
+        let _ = Command::new("udevadm").args(["control", "--reload-rules"]).status();
         bail!("sysctl reload failed; removed our drop-in and attempted to restore system defaults");
     }
     let _ = Command::new("udevadm").args(["control", "--reload-rules"]).status();
