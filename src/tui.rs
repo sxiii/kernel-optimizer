@@ -137,11 +137,7 @@ fn draw(frame: &mut Frame<'_>, page: Page, scroll: u16, hw: &HardwareProfile, re
         ])
         .split(frame.area());
 
-    let tabs = if page == Page::Hardware {
-        " [1] Hardware  [2] Recommendations "
-    } else {
-        " [1] Hardware  [2] Recommendations "
-    };
+    let tabs = " [1] Hardware  [2] Recommendations ";
     let header = Paragraph::new(Line::from(vec![
         Span::styled("KERNEL OPTIMIZER", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::raw(tabs),
