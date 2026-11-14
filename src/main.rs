@@ -119,6 +119,75 @@ fn latest_stable()->Result<String> {
     let versions=v["releases"].as_array().context("kernel.org releases response missing releases")?;
     versions.iter().find(|x|x["moniker"]=="stable").and_then(|x|x["version"].as_str()).map(str::to_string).context("stable version not found")
 }
+fn kernel_release(source: &Path) -> Result<String> {
+    let output = Command::new("make")
+        .current_dir(source)
+        .arg("kernelrelease")
+        .output()
+        .context("running make kernelrelease")?;
+    if !output.status.success() {
+        bail!("make kernelrelease failed");
+    }
+    let release = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if release.is_empty() {
+        bail!("kernel build returned an empty kernel release string");
+    }
+    Ok(release)
+}
+
+fn verify_staged_kernel(stage: &Path, release: &str) -> Result<(String, String, bool)> {
+    let boot_dir = stage.join("boot");
+    let entries = fs::read_dir(&boot_dir)
+        .with_context(|| format!("reading staged boot directory {}", boot_dir.display()))?;
+    let mut images = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let looks_like_image = name.starts_with("vmlinuz")
+            || name == "Image"
+            || name == "Image.gz"
+            || name == "bzImage"
+            || name == "zImage";
+        if looks_like_image && path.is_file() {
+            images.push(path);
+        }
+    }
+    images.sort_by_key(|path| {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if name.contains(release) { 0 } else { 1 }
+    });
+    let image = images.into_iter().next().context(
+        "no kernel image found in staged boot directory; refusing to mark build as verified",
+    )?;
+    if fs::metadata(&image)?.len() == 0 {
+        bail!("staged kernel image is empty: {}", image.display());
+    }
+
+    let checksum = Command::new("sha256sum")
+        .arg(&image)
+        .output()
+        .context("running sha256sum on staged kernel image")?;
+    if !checksum.status.success() {
+        bail!("sha256sum failed for staged kernel image");
+    }
+    let digest = String::from_utf8_lossy(&checksum.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_owned();
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("could not parse SHA-256 digest for staged kernel image");
+    }
+
+    let modules_dir = stage.join("root/lib/modules").join(release);
+    let modules_staged = modules_dir.is_dir();
+    Ok((
+        image.file_name().unwrap_or_default().to_string_lossy().to_string(),
+        digest,
+        modules_staged,
+    ))
+}
+
 fn build(profile_path:&Path,dry:bool)->Result<()> {
     let mut p:Profile=toml::from_str(&fs::read_to_string(profile_path)?)?;
     if p.jobs==0 || p.jobs>4096 {bail!("jobs must be between 1 and 4096");}
@@ -196,9 +265,19 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     run_checked(Command::new("make").current_dir(&src).arg("olddefconfig"))?;
     run_checked(&mut make)?;
     fs::create_dir_all(&p.stage_dir)?;
+    let release = kernel_release(&src)?;
     run_checked(Command::new("make").current_dir(&src).arg("modules_install").env("INSTALL_MOD_PATH",p.stage_dir.join("root")))?;
     run_checked(Command::new("make").current_dir(&src).arg("install").env("INSTALL_PATH",p.stage_dir.join("boot")))?;
-    fs::write(p.stage_dir.join("BUILD-METADATA.txt"),format!("version={}\nlocalversion={}\nsource={}\n",p.version,p.local_version,p.source))?;
+    let (image_name, image_sha256, modules_staged) = verify_staged_kernel(&p.stage_dir, &release)?;
+    let metadata = format!(
+        "version={}\nlocalversion={}\nkernel_release={}\nsource={}\nkernel_image={}\nkernel_image_sha256={}\nmodules_staged={}\n",
+        p.version, p.local_version, release, p.source, image_name, image_sha256, modules_staged
+    );
+    fs::write(p.stage_dir.join("BUILD-METADATA.txt"), metadata)?;
+    println!("Verified staged kernel image: {image_name} (SHA-256 {image_sha256})");
+    if !modules_staged {
+        println!("WARNING: no staged module directory found for {release}; this kernel may be fully built-in or module staging may be incomplete.");
+    }
     println!("Build staged at {}. Not installed or added to bootloader.",p.stage_dir.display());
     Ok(())
 }
