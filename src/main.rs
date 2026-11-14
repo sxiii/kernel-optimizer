@@ -662,6 +662,25 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
         tar_version,
     };
     let compiler_command=if p.ccache { format!("ccache {}",p.compiler) } else { p.compiler.clone() };
+    let mut recorded_commands=vec![
+        "curl --fail --location --retry 3 (download kernel.org archive and detached signature)".into(),
+        "xz -t <archive>".into(),
+        "xz --decompress --stdout <archive> | gpg --no-options --batch --no-auto-key-import --no-auto-key-retrieve --no-auto-key-locate --status-fd=1 --verify <signature> -".into(),
+        "tar --extract --file <signature-verified archive> --no-same-owner --no-same-permissions".into(),
+    ];
+    if config_origin == "defconfig" || config_origin == "defconfig_fallback" {
+        recorded_commands.push("make defconfig".into());
+    }
+    recorded_commands.extend([
+        format!("scripts/config --set-str LOCALVERSION {}",p.local_version),
+        if p.enable_bpf { "scripts/config --enable BPF --enable BPF_SYSCALL".into() } else { "BPF flags unchanged".into() },
+        if p.menuconfig { "make menuconfig (interactive)".into() } else { "menuconfig disabled".into() },
+        "make olddefconfig".into(),
+        format!("make -j{}",p.jobs),
+        "make kernelrelease".into(),
+        format!("make modules_install INSTALL_MOD_PATH={}",p.stage_dir.join("root").display()),
+        format!("make install INSTALL_PATH={}",p.stage_dir.join("boot").display()),
+    ]);
     let build_manifest=BuildProvenance {
         started_unix,
         completed_unix,
@@ -676,15 +695,7 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
         config_origin,
         effective_config_path:".config".into(),
         effective_config_sha256:effective_config_sha256.clone(),
-        commands:vec![
-            format!("scripts/config --set-str LOCALVERSION {}",p.local_version),
-            if p.enable_bpf { "scripts/config --enable BPF --enable BPF_SYSCALL".into() } else { "BPF flags unchanged".into() },
-            if p.menuconfig { "make menuconfig (interactive)".into() } else { "menuconfig disabled".into() },
-            "make olddefconfig".into(),
-            format!("make -j{}",p.jobs),
-            format!("make modules_install INSTALL_MOD_PATH={}",p.stage_dir.join("root").display()),
-            format!("make install INSTALL_PATH={}",p.stage_dir.join("boot").display()),
-        ],
+        commands:recorded_commands,
     };
     let host_manifest=HostProvenance {
         host_kernel_release:host.kernel_release,
