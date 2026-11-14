@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    fs::OpenOptions,
     hint::black_box,
     path::{Path, PathBuf},
     process::Command,
@@ -110,6 +111,82 @@ fn memory_sample(memory_mib: usize) -> Result<f64> {
     Ok((bytes as f64 * 2.0 / (1024.0 * 1024.0)) / elapsed)
 }
 
+fn run_fio(directory: &Path, size_mib: usize, runtime_seconds: usize) -> Result<f64> {
+    if !directory.is_dir() {
+        bail!("fio path must be an existing directory");
+    }
+    if !(32..=4096).contains(&size_mib) {
+        bail!("fio size must be between 32 and 4096 MiB");
+    }
+    if !(3..=60).contains(&runtime_seconds) {
+        bail!("fio runtime must be between 3 and 60 seconds");
+    }
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let test_file = directory.join(format!(
+        ".kernel-optimizer-fio-{}-{stamp}.tmp",
+        std::process::id()
+    ));
+    let placeholder = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&test_file)
+        .context("creating temporary fio test file")?;
+    drop(placeholder);
+
+    let result = (|| -> Result<f64> {
+        let output = Command::new("fio")
+            .arg("--name=kernel-optimizer")
+            .arg("--filename")
+            .arg(&test_file)
+            .arg(format!("--size={size_mib}m"))
+            .args([
+                "--rw=readwrite",
+                "--bs=1m",
+                "--direct=1",
+                "--iodepth=1",
+                "--numjobs=1",
+                "--group_reporting",
+                "--output-format=json",
+            ])
+            .arg(format!("--runtime={runtime_seconds}"))
+            .arg("--time_based")
+            .output()
+            .context("starting fio; install fio to use --fio-path")?;
+        if !output.status.success() {
+            bail!(
+                "fio failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .context("parsing fio JSON output")?;
+        let job = json["jobs"]
+            .as_array()
+            .and_then(|jobs| jobs.first())
+            .context("fio JSON output did not contain a job")?;
+        let read_bytes = job["read"]["bw_bytes"].as_f64().unwrap_or(0.0);
+        let write_bytes = job["write"]["bw_bytes"].as_f64().unwrap_or(0.0);
+        let throughput = (read_bytes + write_bytes) / (1024.0 * 1024.0);
+        if throughput <= 0.0 {
+            bail!("fio returned no read/write throughput");
+        }
+        Ok(throughput)
+    })();
+
+    let cleanup = fs::remove_file(&test_file);
+    if let Err(error) = cleanup {
+        eprintln!(
+            "Warning: could not remove fio temporary file {}: {error}",
+            test_file.display()
+        );
+    }
+    result
+}
+
 fn run_iperf(server: &str) -> Result<f64> {
     let output = Command::new("iperf3")
         .args(["--client", server, "--json", "--time", "5", "--parallel", "1"])
@@ -137,6 +214,9 @@ pub fn run(
     profile: &str,
     cpu_rounds: u64,
     memory_mib: usize,
+    fio_path: Option<&Path>,
+    fio_size_mib: usize,
+    fio_runtime_seconds: usize,
     iperf_server: Option<&str>,
 ) -> Result<BenchmarkReport> {
     if !(1..=20).contains(&iterations) {
@@ -160,6 +240,18 @@ pub fn run(
         summarize("integer-throughput", &format!("{cpu_rounds} rounds"), "iterations/s", true, cpu_samples),
         summarize("memory-copy-bandwidth", &format!("{memory_mib} MiB"), "MiB/s", true, memory_samples),
     ];
+    if let Some(directory) = fio_path {
+        let samples = (0..iterations)
+            .map(|_| run_fio(directory, fio_size_mib, fio_runtime_seconds))
+            .collect::<Result<Vec<_>>>()?;
+        results.push(summarize(
+            "disk-throughput",
+            &format!("fio {fio_size_mib} MiB, {fio_runtime_seconds}s, direct readwrite"),
+            "MiB/s",
+            true,
+            samples,
+        ));
+    }
     if let Some(server) = iperf_server {
         let samples = (0..iterations)
             .map(|_| run_iperf(server))
@@ -169,7 +261,7 @@ pub fn run(
 
     let hardware = crate::hardware::detect();
     let report = BenchmarkReport {
-        schema_version: 1,
+        schema_version: 2,
         created_unix: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
