@@ -119,6 +119,47 @@ fn latest_stable()->Result<String> {
     let versions=v["releases"].as_array().context("kernel.org releases response missing releases")?;
     versions.iter().find(|x|x["moniker"]=="stable").and_then(|x|x["version"].as_str()).map(str::to_string).context("stable version not found")
 }
+fn ensure_kernel_archive(archive: &Path, url: &str) -> Result<()> {
+    let cached_is_valid = archive.exists()
+        && Command::new("xz")
+            .arg("-t")
+            .arg(archive)
+            .status()
+            .is_ok_and(|status| status.success());
+    if cached_is_valid {
+        return Ok(());
+    }
+    if archive.exists() {
+        eprintln!(
+            "Cached kernel archive {} failed integrity testing; downloading a fresh copy.",
+            archive.display()
+        );
+        fs::remove_file(archive)
+            .with_context(|| format!("removing invalid archive {}", archive.display()))?;
+    }
+
+    let temporary = archive.with_extension("download");
+    if temporary.exists() {
+        fs::remove_file(&temporary)?;
+    }
+    let download_result = (|| -> Result<()> {
+        run_checked(
+            Command::new("curl")
+                .args(["--fail", "--location", "--retry", "3", "--output"])
+                .arg(&temporary)
+                .arg(url),
+        )?;
+        run_checked(Command::new("xz").arg("-t").arg(&temporary))?;
+        fs::rename(&temporary, archive)
+            .with_context(|| format!("promoting verified archive to {}", archive.display()))?;
+        Ok(())
+    })();
+    if download_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    download_result
+}
+
 fn kernel_release(source: &Path) -> Result<String> {
     let output = Command::new("make")
         .current_dir(source)
@@ -152,13 +193,23 @@ fn verify_staged_kernel(stage: &Path, release: &str) -> Result<(String, String, 
             images.push(path);
         }
     }
-    images.sort_by_key(|path| {
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if name.contains(release) { 0 } else { 1 }
-    });
-    let image = images.into_iter().next().context(
-        "no kernel image found in staged boot directory; refusing to mark build as verified",
-    )?;
+    let image = images
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().contains(release))
+        })
+        .cloned()
+        .or_else(|| {
+            if images.len() == 1 {
+                images.into_iter().next()
+            } else {
+                None
+            }
+        })
+        .context(
+            "could not uniquely identify the just-built kernel image in staging; clear old images and rebuild",
+        )?;
     if fs::metadata(&image)?.len() == 0 {
         bail!("staged kernel image is empty: {}", image.display());
     }
@@ -208,9 +259,7 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     println!("Build dir: {}",src.display());
     if dry {println!("Dry run only. No files changed.");return Ok(());}
     fs::create_dir_all(&p.build_dir)?;
-    if !archive.exists(){run_checked(Command::new("curl").args(["--fail","--location","--retry","3","--output"]).arg(&archive).arg(&url))?;}
-    // Verify archive integrity before extraction using xz test.
-    run_checked(Command::new("xz").arg("-t").arg(&archive))?;
+    ensure_kernel_archive(&archive, &url)?;
     if !src.exists(){run_checked(Command::new("tar").arg("-xf").arg(&archive).arg("-C").arg(&p.build_dir))?;}
     let config=src.join(".config");
     if !config.exists() {
