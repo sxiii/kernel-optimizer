@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 mod tuning;
-use tuning::Workload;
+use tuning::Workload;\nmod hardware;\nmod benchmark;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::{Path, PathBuf}, process::Command, time::Duration};
@@ -145,7 +145,7 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
 fn main()->Result<()> {
     let cli=Cli::parse();
     match cli.command {
-        Commands::Inspect=>println!("{}",serde_json::to_string_pretty(&hardware())?),
+        Commands::Inspect=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),\n        Commands::Hardware=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),\n        Commands::Benchmark{output,iterations,profile}=>{ let report=benchmark::run(&output,iterations,&profile)?; println!("{}",serde_json::to_string_pretty(&report)?); eprintln!("Saved benchmark report to {}",output.display()); },
         Commands::Sources=>sources(),
         Commands::Profile{file,create}=>profile(&file,create)?,
         Commands::Build{profile,dry_run}=>build(&profile,dry_run)?,
