@@ -66,7 +66,7 @@ enum Commands {
     Tune { #[arg(long, value_enum, default_value="desktop")] profile: Workload, #[arg(long)] dry_run: bool },
     /// Remove optimizer-managed sysctl and udev drop-ins.
     Revert { #[arg(long)] dry_run: bool },
-    /// Install a previously staged kernel through the detected package/boot integration.
+    /// Reserved: installation stays disabled until package and rollback adapters are available.
     Install { #[arg(long)] staged: Option<PathBuf>, #[arg(long)] yes: bool },
 }
 
@@ -460,4 +460,37 @@ fn main()->Result<()> {
         }
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_profile_passes_preflight_validation() {
+        assert!(validate_profile(&Profile::default()).is_ok());
+    }
+
+    #[test]
+    fn profile_validation_rejects_unsupported_compiler_and_sources() {
+        let mut profile = Profile::default();
+        profile.compiler = "zig".into();
+        assert!(validate_profile(&profile).is_err());
+
+        let mut profile = Profile::default();
+        profile.source = "linux-zen".into();
+        assert!(validate_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn profile_validation_rejects_unsafe_local_version_and_shared_paths() {
+        let mut profile = Profile::default();
+        profile.local_version = "-custom/../../boot".into();
+        assert!(validate_profile(&profile).is_err());
+
+        let mut profile = Profile::default();
+        profile.stage_dir = profile.build_dir.clone();
+        assert!(validate_profile(&profile).is_err());
+    }
 }
