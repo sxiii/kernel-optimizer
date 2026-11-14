@@ -170,7 +170,7 @@ fn verify_kernel_archive_with_signers(
 
     let mut gpg_command = Command::new("gpg");
     gpg_command
-        .args(["--no-options", "--batch", "--no-auto-key-import", "--no-auto-key-retrieve", "--status-fd=1"]);
+        .args(["--no-options", "--batch", "--no-auto-key-import", "--no-auto-key-retrieve", "--no-auto-key-locate", "--status-fd=1"]);
     if let Some(home) = gpg_home {
         if !home.is_dir() {
             bail!("configured GPG home is not a directory: {}", home.display());
@@ -445,6 +445,8 @@ mod tests {
             .arg(&home)
             .args([
                 "--batch",
+                "--pinentry-mode",
+                "loopback",
                 "--passphrase",
                 "",
                 "--quick-generate-key",
