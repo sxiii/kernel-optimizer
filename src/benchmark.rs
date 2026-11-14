@@ -22,6 +22,17 @@ pub struct BenchmarkResult {
     pub max: f64,
 }
 
+pub struct BenchmarkOptions<'a> {
+    pub iterations: usize,
+    pub profile: &'a str,
+    pub cpu_rounds: u64,
+    pub memory_mib: usize,
+    pub fio_path: Option<&'a Path>,
+    pub fio_size_mib: usize,
+    pub fio_runtime_seconds: usize,
+    pub iperf_server: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkReport {
     pub schema_version: u32,
@@ -208,17 +219,17 @@ fn run_iperf(server: &str) -> Result<f64> {
     Ok(bits_per_second / 1_000_000.0)
 }
 
-pub fn run(
-    report_path: &Path,
-    iterations: usize,
-    profile: &str,
-    cpu_rounds: u64,
-    memory_mib: usize,
-    fio_path: Option<&Path>,
-    fio_size_mib: usize,
-    fio_runtime_seconds: usize,
-    iperf_server: Option<&str>,
-) -> Result<BenchmarkReport> {
+pub fn run(report_path: &Path, options: BenchmarkOptions<'_>) -> Result<BenchmarkReport> {
+    let BenchmarkOptions {
+        iterations,
+        profile,
+        cpu_rounds,
+        memory_mib,
+        fio_path,
+        fio_size_mib,
+        fio_runtime_seconds,
+        iperf_server,
+    } = options;
     if !(1..=20).contains(&iterations) {
         bail!("iterations must be between 1 and 20");
     }
