@@ -117,20 +117,65 @@ fn render_sysctl(profile: Workload) -> (String, Vec<String>) {
 
 fn render_udev() -> String {
     if detect_virtualization() != "none" {
-        return String::from("# Skipped: virtualization/container detected; host I/O scheduler policy is not assumed.\n");
+        return String::from(
+            "# Skipped: virtualization/container detected; host I/O scheduler policy is not assumed.\n",
+        );
     }
-    let mut rules = String::from("# Managed by kernel-optimizer. Rules only target devices with known queue capabilities.\n");
-    if scheduler_available("none") {
-        rules.push_str("# NVMe: use none when the kernel exposes it.\n");
-        rules.push_str("ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"nvme[0-9]*n[0-9]*\", ATTR{queue/scheduler}=\"none\"\n");
+
+    let mut rules = String::from(
+        "# Managed by kernel-optimizer. Per-device rules use only schedulers exposed by that device.\n",
+    );
+    let Ok(devices) = fs::read_dir("/sys/block") else {
+        return rules;
+    };
+    let mut rule_count = 0_usize;
+
+    for device in devices.flatten() {
+        let name = device.file_name().to_string_lossy().to_string();
+        let queue = device.path().join("queue");
+        let scheduler_path = queue.join("scheduler");
+        let rotational_path = queue.join("rotational");
+        let schedulers = fs::read_to_string(&scheduler_path)
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(|value| value.trim_matches(&['[', ']'][..]).to_owned())
+            .collect::<Vec<_>>();
+        if schedulers.is_empty() {
+            continue;
+        }
+
+        let rotational = fs::read_to_string(rotational_path)
+            .ok()
+            .and_then(|value| value.trim().parse::<u8>().ok());
+        let selected = if name.starts_with("nvme") {
+            schedulers.iter().find(|value| value.as_str() == "none")
+        } else if rotational == Some(1) {
+            schedulers
+                .iter()
+                .find(|value| value.as_str() == "bfq")
+                .or_else(|| schedulers.iter().find(|value| value.as_str() == "mq-deadline"))
+        } else if rotational == Some(0) {
+            schedulers
+                .iter()
+                .find(|value| value.as_str() == "mq-deadline")
+                .or_else(|| schedulers.iter().find(|value| value.as_str() == "kyber"))
+        } else {
+            None
+        };
+
+        if let Some(selected) = selected {
+            rules.push_str(&format!(
+                "# {name}: rotational={rotational:?}; available={schedulers:?}\n"
+            ));
+            rules.push_str(&format!(
+                "ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"{name}\", ATTR{{queue/scheduler}}=\"{selected}\"\n"
+            ));
+            rule_count += 1;
+        }
     }
-    if scheduler_available("mq-deadline") {
-        rules.push_str("# Non-rotational SCSI/SATA SSDs: mq-deadline when available.\n");
-        rules.push_str("ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"sd[a-z]*\", ATTR{queue/rotational}==\"0\", ATTR{queue/scheduler}=\"mq-deadline\"\n");
-    }
-    if scheduler_available("bfq") {
-        rules.push_str("# Rotational disks: BFQ when the running kernel provides it.\n");
-        rules.push_str("ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"sd[a-z]*\", ATTR{queue/rotational}==\"1\", ATTR{queue/scheduler}=\"bfq\"\n");
+
+    if rule_count == 0 {
+        rules.push_str("# No eligible block devices with a suitable scheduler were detected.\n");
     }
     rules
 }
