@@ -928,7 +928,8 @@ mod tests {
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
         ));
         let source = root.join("source");
-        let stage = root.join("stage");
+        let stage_root = root.join("stage-root");
+        let boot_dir = stage_root.join("boot");
         let image_relative = kernel_image_candidates(std::env::consts::ARCH).unwrap()[0];
         let image_source = source.join(image_relative);
         fs::create_dir_all(image_source.parent().unwrap()).unwrap();
@@ -939,25 +940,22 @@ mod tests {
         let release = "6.1.1-ko";
         let image_name = stage_kernel_boot_artifacts(
             &source,
-            &stage,
+            &boot_dir,
             release,
             std::env::consts::ARCH,
         )
         .unwrap();
 
         assert_eq!(image_name, format!("vmlinuz-{release}"));
-        assert_eq!(fs::read(stage.join(&image_name)).unwrap(), b"test kernel image");
+        assert_eq!(fs::read(boot_dir.join(&image_name)).unwrap(), b"test kernel image");
         assert_eq!(
-            fs::read(stage.join(format!("config-{release}"))).unwrap(),
+            fs::read(boot_dir.join(format!("config-{release}"))).unwrap(),
             b"CONFIG_TEST=y\n"
         );
         assert_eq!(
-            fs::read(stage.join(format!("System.map-{release}"))).unwrap(),
+            fs::read(boot_dir.join(format!("System.map-{release}"))).unwrap(),
             b"test system map\n"
         );
-        let stage_root = root.join("stage-root");
-        fs::create_dir_all(stage_root.join("boot")).unwrap();
-        fs::copy(stage.join(&image_name), stage_root.join("boot").join(&image_name)).unwrap();
         let (_, _, modules_staged) = verify_staged_kernel(&stage_root, release).unwrap();
         assert!(!modules_staged);
         fs::remove_dir_all(root).unwrap();
