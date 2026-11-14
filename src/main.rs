@@ -139,12 +139,11 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
                 let release = output("uname", &["-r"]);
                 let boot_config = PathBuf::from(format!("/boot/config-{release}"));
                 let module_config = PathBuf::from(format!("/lib/modules/{release}/build/.config"));
-                if Path::new("/proc/config.gz").exists() {
-                    if let Ok(decoded) = Command::new("gzip").args(["-dc", "/proc/config.gz"]).output() {
-                        if decoded.status.success() {
-                            fs::write(&config, decoded.stdout)?;
-                        }
-                    }
+                if Path::new("/proc/config.gz").exists()
+                    && let Ok(decoded) = Command::new("gzip").args(["-dc", "/proc/config.gz"]).output()
+                    && decoded.status.success()
+                {
+                    fs::write(&config, decoded.stdout)?;
                 }
                 if !config.exists() {
                     for candidate in [&boot_config, &module_config] {
