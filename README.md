@@ -145,5 +145,5 @@ caused by a single sysctl.
 
 ## CI
 
-GitHub Actions checks Rust formatting, Clippy warnings and tests. A separate
+GitHub Actions checks Rust with Clippy and tests. A separate
 ShellCheck/shfmt job runs on shell scripts if any are introduced.
