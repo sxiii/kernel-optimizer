@@ -34,8 +34,9 @@ fn command_output(program: &str, args: &[&str]) -> String {
 fn is_root() -> bool { unsafe { libc::geteuid() == 0 } }
 
 fn detect_zram() -> bool {
-    Path::new("/sys/block").read_dir().ok().into_iter().flatten().flatten()
-        .any(|e| e.file_name().to_string_lossy().starts_with("zram"))
+    // A zram device can exist without being initialized or enabled as swap.
+    read("/proc/swaps").lines().skip(1).any(|line| line.split_whitespace().next()
+        .is_some_and(|name| name.starts_with("/dev/zram")))
 }
 fn detect_virtualization() -> String {
     let detected = command_output("systemd-detect-virt", &[]);
@@ -166,7 +167,7 @@ pub fn tune(profile: Workload, dry_run: bool) -> Result<()> {
 
     // sysctl -e tolerates keys unavailable in this kernel. If reload fails, remove our
     // drop-in and reload the previous configuration to avoid leaving a partial state.
-    let status = Command::new("sysctl").args(["-e", "--load", SYSCTL_PATH]).status()
+    let status = Command::new("sysctl").args(["-e", "-p", SYSCTL_PATH]).status()
         .context("reloading optimizer sysctl drop-in")?;
     if !status.success() {
         let _ = fs::remove_file(SYSCTL_PATH);
