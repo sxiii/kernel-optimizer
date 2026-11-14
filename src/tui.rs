@@ -137,10 +137,20 @@ fn draw(frame: &mut Frame<'_>, page: Page, scroll: u16, hw: &HardwareProfile, re
         ])
         .split(frame.area());
 
-    let tabs = " [1] Hardware  [2] Recommendations ";
+    let hardware_style = if page == Page::Hardware {
+        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let recommendation_style = if page == Page::Recommendations {
+        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
     let header = Paragraph::new(Line::from(vec![
-        Span::styled("KERNEL OPTIMIZER", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(tabs),
+        Span::styled(" KERNEL OPTIMIZER ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(" [1] Hardware ", hardware_style),
+        Span::styled(" [2] Recommendations ", recommendation_style),
     ]))
     .block(Block::default().borders(Borders::ALL).title(" System overview "));
     frame.render_widget(header, areas[0]);
