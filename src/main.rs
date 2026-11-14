@@ -32,6 +32,14 @@ enum Commands {
         cpu_rounds: u64,
         #[arg(long, default_value_t=64)]
         memory_mib: usize,
+        /// Run fio against a temporary file in this existing directory.
+        #[arg(long)]
+        fio_path: Option<PathBuf>,
+        #[arg(long, default_value_t=256)]
+        fio_size_mib: usize,
+        #[arg(long, default_value_t=10)]
+        fio_runtime_seconds: usize,
+        /// Run iperf3 against an explicitly supplied server.
         #[arg(long)]
         iperf_server: Option<String>,
     },
@@ -196,8 +204,8 @@ fn main()->Result<()> {
     match cli.command {
         Commands::Inspect=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
         Commands::Hardware=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
-        Commands::Benchmark{output,iterations,profile,cpu_rounds,memory_mib,iperf_server}=>{
-            let report=benchmark::run(&output,iterations,&profile,cpu_rounds,memory_mib,iperf_server.as_deref())?;
+        Commands::Benchmark{output,iterations,profile,cpu_rounds,memory_mib,fio_path,fio_size_mib,fio_runtime_seconds,iperf_server}=>{
+            let report=benchmark::run(&output,iterations,&profile,cpu_rounds,memory_mib,fio_path.as_deref(),fio_size_mib,fio_runtime_seconds,iperf_server.as_deref())?;
             println!("{}",serde_json::to_string_pretty(&report)?);
             eprintln!("Saved benchmark report to {}",output.display());
         },
