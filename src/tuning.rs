@@ -40,8 +40,7 @@ fn detect_zram() -> bool {
         .is_some_and(|name| name.starts_with("/dev/zram")))
 }
 fn detect_virtualization() -> String {
-    let detected = command_output("systemd-detect-virt", &[]);
-    if detected.is_empty() { "none".into() } else { detected }
+    crate::hardware::detect_virtualization()
 }
 fn supports_extended_swappiness() -> bool {
     let release = command_output("uname", &["-r"]);
