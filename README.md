@@ -66,8 +66,9 @@ The fingerprints are maintained in `src/provenance.rs` and are based on the
 [official kernel.org signature guidance](https://www.kernel.org/signature.html).
 A key downloaded from the same server as the tarball is **not** trusted just
 because it was imported. The application compares the full primary fingerprint
-against the allowlist. It also disables automatic key retrieval during verification
-and fails on bad, expired or revoked signature status.
+against the allowlist. Verification disables GnuPG option files, embedded-key import,
+automatic key retrieval and automatic key location; it fails on bad, expired or
+revoked signature status.
 
 ### Prepare the GnuPG keyring once
 
