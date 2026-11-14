@@ -200,7 +200,10 @@ fn system_recommendations(hw: &HardwareProfile, out: &mut Vec<Recommendation>) {
 }
 
 pub fn generate(profile: Workload) -> RecommendationReport {
-    let hw = hardware::detect();
+    generate_from_hardware(hardware::detect(), profile)
+}
+
+pub fn generate_from_hardware(hw: HardwareProfile, profile: Workload) -> RecommendationReport {
     let mut recommendations = Vec::new();
     cpu_recommendations(&hw, profile, &mut recommendations);
     storage_recommendations(&hw, &mut recommendations);
