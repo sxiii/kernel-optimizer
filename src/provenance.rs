@@ -54,7 +54,7 @@ fn normalized_fingerprint(value: &str) -> String {
         .collect()
 }
 
-fn signer_from_status_with_signers(status: &str, trusted_signers: &[TrustedSigner]) -> Result<SignatureVerification> {
+fn signer_from_status_with_signers(status: &str, trusted_signers: &[TrustedSigner<'_>]) -> Result<SignatureVerification> {
     const FATAL_STATUS: &[&str] = &[
         "BADSIG",
         "EXPSIG",
@@ -150,11 +150,7 @@ fn verify_kernel_archive_with_signers(
     archive: &Path,
     signature: &Path,
     gpg_home: Option<&Path>,
-    trusted_signers: &[TrustedSigner],
-) -> Result<SignatureVerification> {
-    archive: &Path,
-    signature: &Path,
-    gpg_home: Option<&Path>,
+    trusted_signers: &[TrustedSigner<'_>],
 ) -> Result<SignatureVerification> {
     if !archive.is_file() {
         bail!("kernel source archive does not exist: {}", archive.display());
@@ -485,7 +481,7 @@ mod tests {
 
         let trusted = [TrustedSigner {
             name: "Kernel Optimizer test signer",
-            fingerprint: Box::leak(fingerprint.clone().into_boxed_str()),
+            fingerprint: &fingerprint,
         }];
         let raw = root.join("source.tar");
         let archive = root.join("source.tar.xz");
