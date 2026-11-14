@@ -1181,6 +1181,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn finalize_version_is_inferred_from_a_single_staged_release() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-finalize-version-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        let stage_dir = root.join("stage");
+        fs::create_dir_all(stage_dir.join("root/lib/modules/7.3.4-ko")).unwrap();
+
+        let profile = Profile {
+            stage_dir: stage_dir.clone(),
+            ..Profile::default()
+        };
+        assert_eq!(infer_finalize_version(&profile, None).unwrap(), "7.3.4");
+        assert_eq!(
+            infer_finalize_version(&profile, Some("7.3.4")).unwrap(),
+            "7.3.4"
+        );
+
+        fs::create_dir_all(stage_dir.join("root/lib/modules/7.3.5-ko")).unwrap();
+        assert!(infer_finalize_version(&profile, None).is_err());
+        assert_eq!(
+            infer_finalize_version(&profile, Some("7.3.4")).unwrap(),
+            "7.3.4"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn finalize_version_rejects_a_profile_version_mismatch() {
+        let profile = Profile {
+            version: "7.3.5".into(),
+            ..Profile::default()
+        };
+        assert!(infer_finalize_version(&profile, Some("7.3.4")).is_err());
+    }
+
+    #[test]
     fn default_profile_passes_preflight_validation() {
         assert!(validate_profile(&Profile::default()).is_ok());
     }
