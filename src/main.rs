@@ -18,6 +18,10 @@ enum Commands {
     Inspect,
     /// List supported upstream and optimized kernel source tracks.
     Sources,
+    /// Print structured hardware and power-management inventory.
+    Hardware,
+    /// Run repeatable lightweight benchmark probes and write JSON results.
+    Benchmark { #[arg(long, default_value="kernel-optimizer-benchmark.json")] output: PathBuf, #[arg(long, default_value_t=5)] iterations: usize, #[arg(long, default_value="manual")] profile: String },
     /// Create or print an example build profile.
     Profile { #[arg(long, default_value="kernel-optimizer.toml")] file: PathBuf, #[arg(long)] create: bool },
     /// Fetch, configure, compile and stage a kernel. Installation requires a separate explicit step.
