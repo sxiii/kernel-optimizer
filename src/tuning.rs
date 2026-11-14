@@ -5,6 +5,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    os::unix::fs::OpenOptionsExt,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -188,17 +189,28 @@ fn backup_sysctl() -> Result<PathBuf> {
     fs::create_dir_all("/var/backups").context("creating /var/backups")?;
     let path = unique_backup_path();
     let output = Command::new("sysctl").args(["-a"]).output().context("running sysctl -a")?;
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+    if !output.status.success() {
+        bail!("sysctl -a failed; refusing to apply settings without a complete backup");
+    }
+    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
     file.write_all(&output.stdout)?;
+    file.sync_all()?;
     Ok(path)
 }
 fn write_atomic(path: &str, contents: &str) -> Result<()> {
     let target = Path::new(path);
     let parent = target.parent().context("configuration path has no parent")?;
     fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(".kernel-optimizer-{}.tmp", std::process::id()));
-    fs::write(&tmp, contents)?;
-    fs::rename(&tmp, target)?;
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let tmp = parent.join(format!(".kernel-optimizer-{}-{stamp}.tmp", std::process::id()));
+    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o644).open(&tmp)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    if let Err(error) = fs::rename(&tmp, target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error).with_context(|| format!("atomically replacing {}", target.display()));
+    }
     Ok(())
 }
 
