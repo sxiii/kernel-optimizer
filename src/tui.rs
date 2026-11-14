@@ -211,7 +211,7 @@ fn event_loop(
 
 pub fn run(profile: Workload) -> Result<()> {
     let hw = crate::hardware::detect();
-    let report = recommendations::generate(profile);
+    let report = recommendations::generate_from_hardware(hw.clone(), profile);
     let terminal = ratatui::init();
     let result = event_loop(terminal, hw, report);
     ratatui::restore();
