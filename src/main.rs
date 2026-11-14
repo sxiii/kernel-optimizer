@@ -125,7 +125,31 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     let config=src.join(".config");
     if !config.exists() {
         match p.config_base.as_str() {
-            "current" => { let current=Path::new("/proc/config.gz"); if current.exists(){run_checked(Command::new("sh").arg("-c").arg(format!("zcat /proc/config.gz > '{}'",config.display())))?;} else {run_checked(Command::new("make").current_dir(&src).arg("defconfig"))?;} },
+            "current" => {
+                let release = output("uname", &["-r"]);
+                let boot_config = PathBuf::from(format!("/boot/config-{release}"));
+                let module_config = PathBuf::from(format!("/lib/modules/{release}/build/.config"));
+                if Path::new("/proc/config.gz").exists() {
+                    if let Ok(decoded) = Command::new("gzip").args(["-dc", "/proc/config.gz"]).output() {
+                        if decoded.status.success() {
+                            fs::write(&config, decoded.stdout)?;
+                        }
+                    }
+                }
+                if !config.exists() {
+                    for candidate in [&boot_config, &module_config] {
+                        if candidate.is_file() {
+                            fs::copy(candidate, &config)
+                                .with_context(|| format!("copying current kernel config from {}", candidate.display()))?;
+                            break;
+                        }
+                    }
+                }
+                if !config.exists() {
+                    println!("No current kernel config found; falling back to defconfig.");
+                    run_checked(Command::new("make").current_dir(&src).arg("defconfig"))?;
+                }
+            }
             "defconfig" => run_checked(Command::new("make").current_dir(&src).arg("defconfig"))?,
             other => bail!("unsupported config_base '{other}' (use current or defconfig)"),
         }
@@ -135,9 +159,21 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     if p.enable_bpf {run_checked(Command::new("scripts/config").current_dir(&src).args(["--enable","BPF","--enable","BPF_SYSCALL"]))?;}
     if p.enable_lto {println!("LTO requested: kernel config must support a compatible LLVM toolchain; not forcing incompatible LTO options.");}
     if p.menuconfig {run_checked(Command::new("make").current_dir(&src).arg("menuconfig"))?;}
-    let mut make=Command::new("make"); make.current_dir(&src).arg(format!("-j{}",p.jobs));
-    if p.compiler=="clang" {make.env("LLVM","1");}
-    if p.ccache {make.env("CC","ccache gcc");}
+    let mut make=Command::new("make");
+    make.current_dir(&src).arg(format!("-j{}",p.jobs));
+    match p.compiler.as_str() {
+        "gcc" => {
+            make.env("CC", if p.ccache { "ccache gcc" } else { "gcc" });
+        }
+        "clang" => {
+            make.env("LLVM", "1").env("CC", if p.ccache { "ccache clang" } else { "clang" });
+        }
+        other => bail!("unsupported compiler {other}; use gcc or clang"),
+    }
+    if p.use_mold {
+        println!("mold requested, but this build adapter does not force an unsupported linker override.");
+    }
+    run_checked(Command::new("make").current_dir(&src).arg("olddefconfig"))?;
     run_checked(&mut make)?;
     fs::create_dir_all(&p.stage_dir)?;
     run_checked(Command::new("make").current_dir(&src).arg("modules_install").env("INSTALL_MOD_PATH",p.stage_dir.join("root")))?;
