@@ -20,6 +20,10 @@ enum Commands {
     Profile { #[arg(long, default_value="kernel-optimizer.toml")] file: PathBuf, #[arg(long)] create: bool },
     /// Fetch, configure, compile and stage a kernel. Installation requires a separate explicit step.
     Build { #[arg(long, default_value="kernel-optimizer.toml")] profile: PathBuf, #[arg(long)] dry_run: bool },
+    /// Generate/apply workload-aware sysctl and I/O scheduler settings.
+    Tune { #[arg(long, value_enum, default_value="desktop")] profile: Workload, #[arg(long)] dry_run: bool },
+    /// Remove optimizer-managed sysctl and udev drop-ins.
+    Revert { #[arg(long)] dry_run: bool },
     /// Install a previously staged kernel through the detected package/boot integration.
     Install { #[arg(long)] staged: Option<PathBuf>, #[arg(long)] yes: bool },
 }
