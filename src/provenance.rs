@@ -142,9 +142,6 @@ fn signer_from_status_with_signers(status: &str, trusted_signers: &[TrustedSigne
     Ok(verified.remove(0))
 }
 
-fn signer_from_status(status: &str) -> Result<SignatureVerification> {
-    signer_from_status_with_signers(status, TRUSTED_SIGNERS)
-}
 
 fn verify_kernel_archive_with_signers(
     archive: &Path,
@@ -395,7 +392,7 @@ mod tests {
     #[test]
     fn accepts_pinned_primary_fingerprint_from_validsig() {
         let status = "[GNUPG:] GOODSIG 6092693E Greg Kroah-Hartman\n[GNUPG:] VALIDSIG 0123456789012345678901234567890123456789 2026-11-14 1794620000 0 4 0 1 10 00 647F28654894E3BD457199BE38DBBDC86092693E\n";
-        let signer = signer_from_status(status).unwrap();
+        let signer = signer_from_status_with_signers(status, TRUSTED_SIGNERS).unwrap();
         assert_eq!(signer.signer_name, "Greg Kroah-Hartman");
         assert_eq!(
             signer.signer_primary_fingerprint,
@@ -410,10 +407,10 @@ mod tests {
     #[test]
     fn rejects_unpinned_or_bad_signatures() {
         let unknown = "[GNUPG:] VALIDSIG 1111111111111111111111111111111111111111 2026-11-14 1794620000 0 4 0 1 10 00\n";
-        assert!(signer_from_status(unknown).is_err());
+        assert!(signer_from_status_with_signers(unknown, TRUSTED_SIGNERS).is_err());
 
         let revoked = "[GNUPG:] REVKEYSIG 6092693E Greg Kroah-Hartman\n[GNUPG:] VALIDSIG 647F28654894E3BD457199BE38DBBDC86092693E 2026-11-14 1794620000 0 4 0 1 10 00\n";
-        assert!(signer_from_status(revoked).is_err());
+        assert!(signer_from_status_with_signers(revoked, TRUSTED_SIGNERS).is_err());
     }
 
 
