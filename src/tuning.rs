@@ -128,7 +128,7 @@ fn render_udev() -> String {
     }
     if scheduler_available("bfq") {
         rules.push_str("# Rotational disks: BFQ when the running kernel provides it.\n");
-        rules.push_str("ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"sd[a-z]\", ATTR{queue/rotational}==\"1\", ATTR{queue/scheduler}=\"bfq\"\n");
+        rules.push_str("ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"sd[a-z]*\", ATTR{queue/rotational}==\"1\", ATTR{queue/scheduler}=\"bfq\"\n");
     }
     rules
 }
@@ -173,8 +173,16 @@ pub fn tune(profile: Workload, dry_run: bool) -> Result<()> {
 
     // sysctl -e tolerates keys unavailable in this kernel. If reload fails, remove our
     // drop-in and reload the previous configuration to avoid leaving a partial state.
-    let status = Command::new("sysctl").args(["-e", "-p", SYSCTL_PATH]).status()
-        .context("reloading optimizer sysctl drop-in")?;
+    let status = match Command::new("sysctl").args(["-e", "-p", SYSCTL_PATH]).status() {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = fs::remove_file(SYSCTL_PATH);
+            let _ = fs::remove_file(UDEV_PATH);
+            let _ = Command::new("sysctl").arg("--system").status();
+            let _ = Command::new("udevadm").args(["control", "--reload-rules"]).status();
+            return Err(error).context("starting sysctl reload; removed optimizer drop-ins");
+        }
+    };
     if !status.success() {
         let _ = fs::remove_file(SYSCTL_PATH);
         let _ = fs::remove_file(UDEV_PATH);
