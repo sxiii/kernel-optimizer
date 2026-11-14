@@ -5,6 +5,7 @@ use tuning::Workload;
 mod hardware;
 mod benchmark;
 mod recommendations;
+mod tui;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::{Path, PathBuf}, process::Command, time::Duration};
@@ -23,6 +24,8 @@ enum Commands {
     Hardware,
     /// Generate hardware-aware recommendations without applying changes.
     Recommend { #[arg(long, value_enum, default_value="desktop")] profile: Workload },
+    /// Open the interactive, read-only terminal dashboard.
+    Tui { #[arg(long, value_enum, default_value="desktop")] profile: Workload },
     /// Run CPU and memory benchmarks; optionally test an iperf3 server.
     Benchmark {
         #[arg(long, default_value="kernel-optimizer-benchmark.json")]
@@ -338,6 +341,9 @@ fn main()->Result<()> {
         Commands::Recommend{profile}=>{
             let report=recommendations::generate(profile);
             println!("{}",serde_json::to_string_pretty(&report)?);
+        },
+        Commands::Tui{profile}=>{
+            tui::run(profile)?;
         },
         Commands::Benchmark{output,iterations,profile,cpu_rounds,memory_mib,fio_path,fio_size_mib,fio_runtime_seconds,iperf_server}=>{
             let report=benchmark::run(
