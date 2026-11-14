@@ -212,7 +212,19 @@ fn main()->Result<()> {
             println!("{}",serde_json::to_string_pretty(&report)?);
         },
         Commands::Benchmark{output,iterations,profile,cpu_rounds,memory_mib,fio_path,fio_size_mib,fio_runtime_seconds,iperf_server}=>{
-            let report=benchmark::run(&output,iterations,&profile,cpu_rounds,memory_mib,fio_path.as_deref(),fio_size_mib,fio_runtime_seconds,iperf_server.as_deref())?;
+            let report=benchmark::run(
+                &output,
+                benchmark::BenchmarkOptions {
+                    iterations,
+                    profile: &profile,
+                    cpu_rounds,
+                    memory_mib,
+                    fio_path: fio_path.as_deref(),
+                    fio_size_mib,
+                    fio_runtime_seconds,
+                    iperf_server: iperf_server.as_deref(),
+                },
+            )?;
             println!("{}",serde_json::to_string_pretty(&report)?);
             eprintln!("Saved benchmark report to {}",output.display());
         },
