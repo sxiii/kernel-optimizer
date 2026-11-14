@@ -59,6 +59,8 @@ enum Commands {
     },
     /// Run a read-only pre-build environment and profile check.
     Doctor { #[arg(long, default_value="kernel-optimizer.toml")] profile: PathBuf },
+    /// Run a read-only pre-build environment and profile check.
+    Doctor { #[arg(long, default_value="kernel-optimizer.toml")] profile: PathBuf },
     /// Create or print an example build profile.
     Profile { #[arg(long, default_value="kernel-optimizer.toml")] file: PathBuf, #[arg(long)] create: bool },
     /// Fetch, configure, compile and stage a kernel. Installation requires a separate explicit step.
@@ -328,6 +330,275 @@ fn doctor(profile_path: &Path) -> Result<()> {
     if warnings > 0 { println!("Review the warnings before starting a long kernel build."); }
     else { println!("Environment looks ready for a kernel build."); }
     Ok(())
+}
+
+
+fn validate_profile(p: &Profile) -> Result<()> {
+    if !(1..=4096).contains(&p.jobs) { bail!("jobs must be between 1 and 4096"); }
+    if p.source != "linux" { bail!("source '{}' is not supported by the safe builder yet; use source=linux", p.source); }
+    if p.version != "stable" && !Regex::new(r"^\d+\.\d+(\.\d+)?$")?.is_match(&p.version) { bail!("invalid kernel version: {}", p.version); }
+    if p.local_version.contains('/') || p.local_version.contains(' ') || p.local_version.contains('\n') { bail!("local_version may not contain slash, spaces or newlines"); }
+    if !matches!(p.config_base.as_str(), "current" | "defconfig") { bail!("unsupported config_base '{}' (use current or defconfig)", p.config_base); }
+    if !matches!(p.compiler.as_str(), "gcc" | "clang") { bail!("unsupported compiler {}; use gcc or clang", p.compiler); }
+    if p.build_dir == p.stage_dir
+        || p.build_dir.starts_with(&p.stage_dir)
+        || p.stage_dir.starts_with(&p.build_dir)
+    {
+        bail!("build_dir and stage_dir must be separate, non-overlapping directories");
+    }
+    Ok(())
+}
+
+fn command_available(program: &str) -> bool {
+    Command::new(program).arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().is_ok()
+}
+
+fn nearest_existing_path(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path;
+    loop {
+        if candidate.exists() { return Some(candidate.to_path_buf()); }
+        candidate = candidate.parent()?;
+    }
+}
+
+fn available_gib(path: &Path) -> Option<f64> {
+    let existing = nearest_existing_path(path)?;
+    let output = Command::new("df").args(["-Pk"]).arg(existing).output().ok()?;
+    if !output.status.success() { return None; }
+    let line = String::from_utf8_lossy(&output.stdout).lines().last()?.to_owned();
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let available_kib = fields.get(3)?.parse::<u64>().ok()?;
+    Some(available_kib as f64 / 1024.0 / 1024.0)
+}
+
+fn doctor(profile_path: &Path) -> Result<()> {
+    let (p, profile_loaded) = if profile_path.is_file() {
+        (toml::from_str::<Profile>(&fs::read_to_string(profile_path).with_context(|| format!("reading {}", profile_path.display()))?)?, true)
+    } else {
+        (Profile::default(), false)
+    };
+    validate_profile(&p).context("invalid build profile")?;
+
+    println!("Kernel build preflight (read-only)\nProfile: {}", if profile_loaded { profile_path.display().to_string() } else { "built-in defaults".into() });
+    let mut failures = 0usize;
+    let mut warnings = 0usize;
+    let required = ["make", "curl", "xz", "tar", "gpg", "bc", "bison", "flex", "perl", "python3"];
+    for tool in required {
+        if command_available(tool) { println!("[ ok ] {tool} available"); }
+        else { println!("[FAIL] {tool} not found in PATH"); failures += 1; }
+    }
+    if command_available(&p.compiler) { println!("[ ok ] {} compiler available", p.compiler); }
+    else { println!("[FAIL] {} compiler not found in PATH", p.compiler); failures += 1; }
+    if p.ccache {
+        if command_available("ccache") { println!("[ ok ] ccache available (enabled in profile)"); }
+        else { println!("[FAIL] ccache is enabled in the profile but not installed"); failures += 1; }
+    } else if command_available("ccache") { println!("[ ok ] ccache available (not required)"); }
+    if command_available("pahole") { println!("[ ok ] pahole available"); }
+    else { println!("[WARN] pahole missing; BTF-enabled kernel configurations may fail"); warnings += 1; }
+    if Path::new("/usr/include/openssl/ssl.h").is_file() || Path::new("/usr/local/include/openssl/ssl.h").is_file() {
+        println!("[ ok ] OpenSSL development headers found");
+    } else { println!("[WARN] OpenSSL development headers not found in standard include paths"); warnings += 1; }
+
+    let release = output("uname", &["-r"]);
+    let current_config = Path::new("/proc/config.gz").is_file()
+        || PathBuf::from(format!("/boot/config-{release}")).is_file()
+        || PathBuf::from(format!("/lib/modules/{release}/build/.config")).is_file();
+    if p.config_base == "current" && current_config { println!("[ ok ] current kernel config source found"); }
+    else if p.config_base == "current" { println!("[WARN] current kernel config unavailable; build will fall back to defconfig"); warnings += 1; }
+    else { println!("[ ok ] defconfig selected explicitly"); }
+
+    for (label, path, floor) in [("build", &p.build_dir, 20.0_f64), ("stage", &p.stage_dir, 2.0_f64)] {
+        match available_gib(path) {
+            Some(gib) if gib >= floor => println!("[ ok ] {label} filesystem: {gib:.1} GiB available ({})", path.display()),
+            Some(gib) => { println!("[WARN] {label} filesystem has only {gib:.1} GiB free; heuristic recommendation is at least {floor:.0} GiB ({})", path.display()); warnings += 1; }
+            None => { println!("[WARN] unable to determine free space for {label} path {}", path.display()); warnings += 1; }
+        }
+    }
+    if unsafe { libc::geteuid() } == 0 { println!("[WARN] running as root; prefer an unprivileged build user"); warnings += 1; }
+    if !profile_loaded { println!("[INFO] {} not found; checked built-in defaults. Create it with kernel-optimizer profile --create.", profile_path.display()); }
+    println!("\nPreflight summary: {failures} failure(s), {warnings} warning(s).");
+    if failures > 0 { bail!("preflight failed; install the missing build dependencies and run doctor again"); }
+    if warnings > 0 { println!("Review the warnings before starting a long kernel build."); }
+    else { println!("Environment looks ready for a kernel build."); }
+    Ok(())
+}
+
+
+fn download_signature(path: &Path, url: &str) -> Result<()> {
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let temporary = path.with_extension(format!("download-{}-{stamp}", std::process::id()));
+    let result = (|| -> Result<()> {
+        run_checked(
+            Command::new("curl")
+                .args(["--fail", "--location", "--retry", "3", "--output"])
+                .arg(&temporary)
+                .arg(url),
+        )?;
+        if fs::metadata(&temporary)?.len() == 0 {
+            bail!("downloaded kernel signature is empty");
+        }
+        fs::rename(&temporary, path)
+            .with_context(|| format!("promoting verified download to {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+// Re-extract the signed source archive on every build. Only the previous .config is
+// retained; local edits to source files cannot silently survive outside the signature.
+fn refresh_source_tree(archive: &Path, source: &Path, build_dir: &Path, version: &str) -> Result<bool> {
+    let source_metadata = match fs::symlink_metadata(source) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("inspecting source tree path {}", source.display())),
+    };
+    if source_metadata.as_ref().is_some_and(|metadata| metadata.file_type().is_symlink()) {
+        bail!("refusing to replace a symlink at source tree path {}", source.display());
+    }
+    if source_metadata.as_ref().is_some_and(|metadata| !metadata.is_dir()) {
+        bail!("source tree path exists but is not a directory: {}", source.display());
+    }
+    let saved_config = if source.join(".config").is_file() {
+        Some(fs::read(source.join(".config")).context("reading existing kernel .config for preservation")?)
+    } else {
+        None
+    };
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let temporary = build_dir.join(format!(".kernel-optimizer-extract-{}-{stamp}", std::process::id()));
+    if temporary.exists() {
+        fs::remove_dir_all(&temporary)?;
+    }
+    fs::create_dir(&temporary)?;
+    let extraction = run_checked(
+        Command::new("tar")
+            .args(["--extract", "--file"])
+            .arg(archive)
+            .arg("--directory")
+            .arg(&temporary)
+            .args(["--no-same-owner", "--no-same-permissions"]),
+    );
+    if let Err(error) = extraction {
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(error).context("extracting signed kernel source archive");
+    }
+    let extracted_root = temporary.join(format!("linux-{version}"));
+    if !extracted_root.is_dir() {
+        let _ = fs::remove_dir_all(&temporary);
+        bail!("signed archive did not contain expected top-level directory linux-{version}");
+    }
+    let backup = build_dir.join(format!(".kernel-optimizer-old-source-{}-{stamp}", std::process::id()));
+    let had_source = source_metadata.is_some();
+    if had_source {
+        if let Err(error) = fs::rename(source, &backup) {
+            let _ = fs::remove_dir_all(&temporary);
+            return Err(error).with_context(|| format!("moving previous source tree {} aside", source.display()));
+        }
+    }
+    if let Err(error) = fs::rename(&extracted_root, source) {
+        if had_source {
+            let _ = fs::rename(&backup, source);
+        }
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(error).with_context(|| format!("promoting fresh source tree to {}", source.display()));
+    }
+    if let Some(config) = saved_config.as_ref() {
+        if let Err(error) = fs::write(source.join(".config"), config) {
+            let _ = fs::remove_dir_all(source);
+            if had_source {
+                let _ = fs::rename(&backup, source);
+            }
+            let _ = fs::remove_dir_all(&temporary);
+            return Err(error).context("restoring the prior kernel .config into the clean source tree");
+        }
+    }
+    fs::remove_dir_all(&temporary)?;
+    if had_source {
+        fs::remove_dir_all(&backup)
+            .with_context(|| format!("removing superseded source tree {}", backup.display()))?;
+    }
+    Ok(saved_config.is_some())
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+#[derive(Debug, Serialize)]
+struct SourceProvenance {
+    project: String,
+    version: String,
+    archive_url: String,
+    archive_sha256: String,
+    signature_url: String,
+    signature_sha256: String,
+    signature_verified: bool,
+    signature_verification_method: String,
+    trust_reference: String,
+    signature_creation_date: String,
+    signature_timestamp: String,
+    signature_public_key_algorithm: String,
+    signature_hash_algorithm: String,
+    signer_name: String,
+    signer_primary_fingerprint: String,
+    gpg_version: Option<String>,
+    xz_version: Option<String>,
+    curl_version: Option<String>,
+    tar_version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BuildProvenance {
+    started_unix: u64,
+    completed_unix: u64,
+    duration_seconds: f64,
+    profile: Profile,
+    compiler_command: String,
+    compiler_environment: String,
+    compiler_version: Option<String>,
+    ccache_version: Option<String>,
+    make_version: Option<String>,
+    rustc_version: Option<String>,
+    config_origin: String,
+    effective_config_path: String,
+    effective_config_sha256: String,
+    commands: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct HostProvenance {
+    host_kernel_release: String,
+    architecture: String,
+    cpu_model: String,
+    cpu_microarchitecture: String,
+    logical_cpus: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ArtifactProvenance {
+    kernel_release: String,
+    kernel_image: String,
+    kernel_image_sha256: String,
+    system_map: Option<String>,
+    system_map_sha256: Option<String>,
+    modules_directory: String,
+    modules_staged: bool,
+    modules_tree_sha256: Option<String>,
+    modules_file_count: u64,
+    modules_total_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct BuildManifest {
+    schema_version: u32,
+    generated_unix: u64,
+    application_version: &'static str,
+    source: SourceProvenance,
+    build: BuildProvenance,
+    host: HostProvenance,
+    artifacts: ArtifactProvenance,
 }
 
 
@@ -777,6 +1048,7 @@ fn main()->Result<()> {
             print!("{}",benchmark::compare(&baseline,&candidate)?);
         },
         Commands::Sources=>sources(),
+        Commands::Doctor{profile}=>doctor(&profile)?,
         Commands::Doctor{profile}=>doctor(&profile)?,
         Commands::Profile{file,create}=>profile(&file,create)?,
         Commands::Build{profile,dry_run}=>build(&profile,dry_run)?,
