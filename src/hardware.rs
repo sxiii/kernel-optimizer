@@ -48,7 +48,7 @@ fn microarch(vendor: &str, family: Option<&str>, model: Option<&str>) -> String 
         return match model { 0x00..=0x0f => "Zen 3 (Family 19h)".into(), 0x10..=0x1f => "Zen 4 (Family 19h)".into(), 0x60..=0x7f => "Zen 4/5 family (model-dependent)".into(), 0xa0..=0xaf => "AMD Family 19h model 0xA* (microarchitecture requires full CPUID decode)".into(), _ => "AMD Family 19h (Zen 3/4/5 variant; exact CPUID mapping needed)".into() };
     }
     if vendor == "AuthenticAMD" {
-        return match family { 0x17 => "Zen / Zen+ (Family 17h)".into(), 0x18 => "AMD Family 18h".into(), 0x1a => "AMD Family 1Ah".into(), _ => format!("AMD family {family:#x}") };
+        return match family { 0x17 => "Zen / Zen+ (Family 17h)".into(), 0x18 => "AMD Family 18h".into(), 0x1a => "Zen 5 (AMD Family 1Ah)".into(), _ => format!("AMD family {family:#x}") };
     }
     if vendor == "GenuineIntel" {
         return match family { 6 => match model { 0x8e | 0x9e => "Intel Skylake-derived (Kaby/Coffee/Whiskey Lake)".into(), 0x97 | 0x9a => "Intel Alder Lake".into(), 0xb7 | 0xba | 0xbf => "Intel Raptor Lake family".into(), 0xaa | 0xac => "Intel Meteor Lake".into(), 0xc5 | 0xc6 => "Intel Lunar Lake family".into(), _ => format!("Intel family 6 model {model:#x}") }, _ => format!("Intel family {family}") };
