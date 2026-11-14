@@ -19,15 +19,15 @@ pub struct SignatureVerification {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct TrustedSigner {
-    name: &'static str,
-    fingerprint: &'static str,
+struct TrustedSigner<'a> {
+    name: &'a str,
+    fingerprint: &'a str,
 }
 
 // These fingerprints are copied from kernel.org's published "Important fingerprints"
 // list. The list is deliberately compiled into the application: a key downloaded from
 // the same endpoint as the tarball is never trusted merely because GnuPG imported it.
-const TRUSTED_SIGNERS: &[TrustedSigner] = &[
+const TRUSTED_SIGNERS: &[TrustedSigner<'static>] = &[
     TrustedSigner {
         name: "Linus Torvalds",
         fingerprint: "ABAF11C65A2970B130ABE3C479BE3E4300411886",
