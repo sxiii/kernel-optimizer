@@ -83,10 +83,12 @@ fn render_sysctl(profile: Workload) -> (String, Vec<String>) {
         out.push_str(&format!("vm.swappiness = {swappiness}\n"));
     }
 
-    // A bounded reserve avoids tiny reserves on large-memory machines and huge reserves on small systems.
-    if mem_kib > 0 && virt == "none" {
+    // A 64 MiB floor can consume a large share of RAM on small systems.
+    if mem_kib >= 4 * 1024 * 1024 && virt == "none" {
         out.push_str("\n# Reserve roughly 1% of RAM for atomic allocations, bounded to 64-512 MiB.\n");
         out.push_str(&format!("vm.min_free_kbytes = {min_free}\n"));
+    } else if mem_kib > 0 && mem_kib < 4 * 1024 * 1024 {
+        notes.push("Less than 4 GiB RAM detected: skipped the 64 MiB minimum memory-reserve heuristic to avoid consuming an excessive share of memory.".into());
     } else if virt != "none" {
         notes.push("Virtualization/container detected: skipped host memory-reserve tuning.".into());
     }
@@ -207,15 +209,19 @@ fn write_atomic(path: &str, contents: &str) -> Result<()> {
     fs::create_dir_all(parent)?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let tmp = parent.join(format!(".kernel-optimizer-{}-{stamp}.tmp", std::process::id()));
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o644).open(&tmp)?;
-    file.write_all(contents.as_bytes())?;
-    file.sync_all()?;
-    drop(file);
-    if let Err(error) = fs::rename(&tmp, target) {
+    let write_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o644).open(&tmp)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, target)
+            .with_context(|| format!("atomically replacing {}", target.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
         let _ = fs::remove_file(&tmp);
-        return Err(error).with_context(|| format!("atomically replacing {}", target.display()));
     }
-    Ok(())
+    write_result
 }
 
 fn previous_file(path: &str) -> Result<Option<String>> {
