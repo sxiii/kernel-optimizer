@@ -120,8 +120,10 @@ fn render_udev() -> String {
         return String::from("# Skipped: virtualization/container detected; host I/O scheduler policy is not assumed.\n");
     }
     let mut rules = String::from("# Managed by kernel-optimizer. Rules only target devices with known queue capabilities.\n");
-    rules.push_str("# NVMe: use none when the kernel exposes it.\n");
-    rules.push_str("ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"nvme[0-9]*n[0-9]*\", ATTR{queue/scheduler}=\"none\"\n");
+    if scheduler_available("none") {
+        rules.push_str("# NVMe: use none when the kernel exposes it.\n");
+        rules.push_str("ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"nvme[0-9]*n[0-9]*\", ATTR{queue/scheduler}=\"none\"\n");
+    }
     if scheduler_available("mq-deadline") {
         rules.push_str("# Non-rotational SCSI/SATA SSDs: mq-deadline when available.\n");
         rules.push_str("ACTION==\"add|change\", SUBSYSTEM==\"block\", KERNEL==\"sd[a-z]*\", ATTR{queue/rotational}==\"0\", ATTR{queue/scheduler}=\"mq-deadline\"\n");
