@@ -72,6 +72,16 @@ impl Default for Profile {
     }}
 }
 
+fn output(program: &str, args: &[&str]) -> String {
+    Command::new(program)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|result| result.status.success())
+        .map(|result| String::from_utf8_lossy(&result.stdout).trim().to_owned())
+        .unwrap_or_default()
+}
+
 fn sources() {
     println!("SOURCE            TRACK / PURPOSE");
     println!("linux             Latest stable upstream kernel (kernel.org)");
