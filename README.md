@@ -126,6 +126,10 @@ kernel-optimizer doctor
 kernel-optimizer profile --create
 kernel-optimizer profile
 kernel-optimizer build --dry-run
+
+# Recover metadata after a build completed but staging finalization was interrupted.
+# This validates existing files; it does not compile or reinstall modules.
+kernel-optimizer finalize --version 7.3.4
 ```
 
 Edit `kernel-optimizer.toml` before a real build. The defaults use the current kernel config when available and build with the detected logical CPU count.
@@ -330,6 +334,26 @@ These records improve traceability; they do **not** claim a reproducible build,
 prove the compiler or host was uncompromised, or replace Secure Boot/module
 signing. A checksum detects later artifact changes; source authenticity comes
 from the verified detached developer signature.
+
+### Recover metadata after an interrupted staging step
+
+When compilation and `modules_install` succeeded but the build stopped before
+writing its metadata, use `kernel-optimizer finalize --version X.Y.Z` with the
+same profile used for the build. The command does not compile the kernel, rerun
+`modules_install`, invoke `make install`, or generate an initramfs. It validates
+the existing kernel release, compares the staged image/config/`System.map` with
+the surviving build-tree files, checks the module indexes, re-verifies the cached
+kernel.org detached signature against the pinned signer allowlist, and hashes the
+staged modules tree before writing the two metadata files.
+
+The command requires the existing source/build tree, staged artifacts, cached
+`linux-X.Y.Z.tar.xz` archive and `linux-X.Y.Z.tar.sign` signature. If only one
+matching module release exists under the staging root, `--version` may be omitted.
+Recovered manifests use schema version 2 and explicitly mark original build timing,
+host inventory, compiler versions and command history as unavailable rather than
+inventing them. Source signature verification and staged artifact hashes are
+recomputed during recovery. The recovered manifest cannot independently prove
+that the source tree was not edited after the original extraction.
 
 The build remains staged outside the live boot path. Initramfs generation,
 distribution package creation, module signing, Secure Boot enrollment, bootloader

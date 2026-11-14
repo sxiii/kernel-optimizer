@@ -63,6 +63,14 @@ enum Commands {
     Profile { #[arg(long, default_value="kernel-optimizer.toml")] file: PathBuf, #[arg(long)] create: bool },
     /// Fetch, configure, compile and stage a kernel. Installation requires a separate explicit step.
     Build { #[arg(long, default_value="kernel-optimizer.toml")] profile: PathBuf, #[arg(long)] dry_run: bool },
+    /// Verify and write metadata for an already-built kernel in the staging directory; does not compile.
+    Finalize {
+        #[arg(long, default_value="kernel-optimizer.toml")]
+        profile: PathBuf,
+        /// Upstream kernel version (for example 7.3.4); inferred from staged modules when omitted.
+        #[arg(long)]
+        version: Option<String>,
+    },
     /// Generate/apply workload-aware sysctl and I/O scheduler settings.
     Tune { #[arg(long, value_enum, default_value="desktop")] profile: Workload, #[arg(long)] dry_run: bool },
     /// Remove optimizer-managed sysctl and udev drop-ins.
@@ -532,9 +540,14 @@ struct SourceProvenance {
 
 #[derive(Debug, Serialize)]
 struct BuildProvenance {
-    started_unix: u64,
-    completed_unix: u64,
-    duration_seconds: f64,
+    // Null when recovering metadata because the original build timestamps were not recorded.
+    started_unix: Option<u64>,
+    completed_unix: Option<u64>,
+    duration_seconds: Option<f64>,
+    metadata_generated_unix: u64,
+    metadata_recovered: bool,
+    recovery_note: Option<String>,
+    recovery_actions: Vec<String>,
     profile: Profile,
     compiler_command: String,
     compiler_environment: String,
@@ -578,7 +591,8 @@ struct BuildManifest {
     application_version: &'static str,
     source: SourceProvenance,
     build: BuildProvenance,
-    host: HostProvenance,
+    // Absent for recovered manifests: the original build host could not be attested.
+    host: Option<HostProvenance>,
     artifacts: ArtifactProvenance,
 }
 
@@ -764,9 +778,13 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
         format!("copy built kernel image, .config and System.map into {}",p.stage_dir.join("boot").display()),
     ]);
     let build_manifest=BuildProvenance {
-        started_unix,
-        completed_unix,
-        duration_seconds:build_timer.elapsed().as_secs_f64(),
+        started_unix:Some(started_unix),
+        completed_unix:Some(completed_unix),
+        duration_seconds:Some(build_timer.elapsed().as_secs_f64()),
+        metadata_generated_unix:completed_unix,
+        metadata_recovered:false,
+        recovery_note:None,
+        recovery_actions:Vec::new(),
         profile:recorded_profile,
         compiler_command:compiler_command.clone(),
         compiler_environment:if p.compiler == "clang" { format!("CC={compiler_command}; LLVM=1") } else { format!("CC={compiler_command}") },
@@ -801,12 +819,12 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
         modules_total_bytes,
     };
     let manifest=BuildManifest {
-        schema_version:1,
+        schema_version:2,
         generated_unix:completed_unix,
         application_version:env!("CARGO_PKG_VERSION"),
         source:source_manifest,
         build:build_manifest,
-        host:host_manifest,
+        host:Some(host_manifest),
         artifacts,
     };
     provenance::write_json_atomic(&p.stage_dir.join("provenance.json"),&manifest)?;
@@ -826,6 +844,290 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     println!("Build staged at {}. Not installed or added to bootloader.",p.stage_dir.display());
     Ok(())
 }
+
+fn infer_finalize_version(p: &Profile, override_version: Option<&str>) -> Result<String> {
+    let version_pattern = Regex::new(r"^\d+\.\d+(\.\d+)?$")?;
+    if let Some(version) = override_version {
+        if !version_pattern.is_match(version) {
+            bail!("invalid kernel version '{version}'; expected X.Y or X.Y.Z");
+        }
+        if p.version != "stable" && p.version != version {
+            bail!(
+                "requested version {version} does not match profile version {}; update the profile or omit --version",
+                p.version
+            );
+        }
+        return Ok(version.to_owned());
+    }
+
+    let modules_root = p.stage_dir.join("root/lib/modules");
+    let entries = fs::read_dir(&modules_root)
+        .with_context(|| format!("reading staged modules directory {}", modules_root.display()))?;
+    let mut versions = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let release = entry.file_name().to_string_lossy().to_string();
+        let Some(version) = release.strip_suffix(&p.local_version) else {
+            continue;
+        };
+        if version_pattern.is_match(version) {
+            versions.push(version.to_owned());
+        }
+    }
+    versions.sort();
+    versions.dedup();
+    match versions.as_slice() {
+        [version] => Ok(version.clone()),
+        [] => bail!(
+            "could not infer the kernel version from staged modules under {}; pass --version X.Y.Z",
+            modules_root.display()
+        ),
+        _ => bail!(
+            "multiple staged kernel versions were found ({}); pass --version explicitly",
+            versions.join(", ")
+        ),
+    }
+}
+
+fn finalize(profile_path: &Path, version_override: Option<&str>) -> Result<()> {
+    let mut p: Profile = toml::from_str(
+        &fs::read_to_string(profile_path)
+            .with_context(|| format!("reading build profile {}", profile_path.display()))?
+    )?;
+    validate_profile(&p)?;
+
+    let version = infer_finalize_version(&p, version_override)?;
+    p.version = version.clone();
+    let release = format!("{version}{}", p.local_version);
+    let source_dir = p.build_dir.join(format!("linux-{version}"));
+    let stage_boot = p.stage_dir.join("boot");
+    let modules_dir = p.stage_dir.join("root/lib/modules").join(&release);
+
+    if !source_dir.is_dir() {
+        bail!("existing kernel source/build directory is missing: {}", source_dir.display());
+    }
+    if !source_dir.join(".config").is_file() {
+        bail!("built kernel .config is missing: {}", source_dir.join(".config").display());
+    }
+    if !modules_dir.is_dir() {
+        bail!("staged modules for {release} are missing: {}", modules_dir.display());
+    }
+
+    println!("Finalizing existing kernel build {release}; no compilation or module installation will be run.");
+
+    // kernelrelease reads generated build metadata; it does not compile the kernel.
+    let actual_release = kernel_release(&source_dir)?;
+    if actual_release != release {
+        bail!(
+            "source tree reports kernel release {actual_release}, but staged module directory/profile expects {release}"
+        );
+    }
+
+    for index in ["modules.dep", "modules.alias"] {
+        let path = modules_dir.join(index);
+        if !path.is_file() || fs::metadata(&path)?.len() == 0 {
+            bail!(
+                "staged module index {} is missing or empty; do not finalize an incomplete modules_install",
+                path.display()
+            );
+        }
+    }
+
+    let (image_name, image_sha256, modules_staged) = verify_staged_kernel(&p.stage_dir, &release)?;
+    if !modules_staged {
+        bail!("staged module directory for {release} was not found");
+    }
+    let expected_image_name = format!("vmlinuz-{release}");
+    if image_name != expected_image_name {
+        bail!(
+            "staged image is named {image_name}, expected {expected_image_name}; refusing to finalize ambiguous artifacts"
+        );
+    }
+
+    let source_image = kernel_image_candidates(std::env::consts::ARCH)?
+        .iter()
+        .map(|relative| source_dir.join(relative))
+        .find(|path| path.is_file())
+        .context("built kernel image is missing from the source/build directory")?;
+    let source_image_sha256 = provenance::sha256_file(&source_image)?;
+    if source_image_sha256 != image_sha256 {
+        bail!(
+            "staged kernel image hash does not match the built image at {}; refusing to attest mismatched artifacts",
+            source_image.display()
+        );
+    }
+
+    let config_path = source_dir.join(".config");
+    let staged_config_path = stage_boot.join(format!("config-{release}"));
+    if !staged_config_path.is_file() {
+        bail!("staged kernel config is missing: {}", staged_config_path.display());
+    }
+    let effective_config_sha256 = provenance::sha256_file(&config_path)?;
+    if provenance::sha256_file(&staged_config_path)? != effective_config_sha256 {
+        bail!("staged config-{release} does not match the build tree .config");
+    }
+
+    let system_map_source = source_dir.join("System.map");
+    let system_map_staged = stage_boot.join(format!("System.map-{release}"));
+    let system_map_sha256 = if system_map_source.is_file() {
+        if !system_map_staged.is_file() {
+            bail!("System.map exists in the build tree but is missing from staging");
+        }
+        let source_hash = provenance::sha256_file(&system_map_source)?;
+        if provenance::sha256_file(&system_map_staged)? != source_hash {
+            bail!("staged System.map-{release} does not match the build tree System.map");
+        }
+        Some(source_hash)
+    } else {
+        None
+    };
+
+    let archive = p.build_dir.join(format!("linux-{version}.tar.xz"));
+    let signature = p.build_dir.join(format!("linux-{version}.tar.sign"));
+    let major = version.split('.').next().context("kernel version has no major component")?;
+    let archive_url = format!("https://cdn.kernel.org/pub/linux/kernel/v{major}.x/linux-{version}.tar.xz");
+    let signature_url = format!("https://cdn.kernel.org/pub/linux/kernel/v{major}.x/linux-{version}.tar.sign");
+
+    // Re-verify the cached signature now. Hashes are checked before and after
+    // verification to detect replacement while the archive is being read.
+    let archive_sha256_before = provenance::sha256_file(&archive)
+        .with_context(|| format!("reading cached source archive {}", archive.display()))?;
+    let signature_sha256_before = provenance::sha256_file(&signature)
+        .with_context(|| format!("reading cached detached signature {}", signature.display()))?;
+    let signature_verification =
+        provenance::verify_kernel_archive(&archive, &signature, p.gpg_home.as_deref())?;
+    let archive_sha256 = provenance::sha256_file(&archive)?;
+    let signature_sha256 = provenance::sha256_file(&signature)?;
+    if archive_sha256 != archive_sha256_before || signature_sha256 != signature_sha256_before {
+        bail!("kernel archive or detached signature changed during finalization; refusing to write provenance");
+    }
+
+    println!(
+        "Re-verified kernel.org source signature by {} ({})",
+        signature_verification.signer_name,
+        signature_verification.signer_primary_fingerprint
+    );
+
+    let (modules_tree_sha256, modules_file_count, modules_total_bytes) =
+        provenance::sha256_tree(&modules_dir)
+            .context("hashing staged kernel modules tree")?;
+    let generated_unix = unix_timestamp();
+
+    let source_manifest = SourceProvenance {
+        project: "Linux kernel.org upstream".into(),
+        version: version.clone(),
+        archive_url,
+        archive_sha256,
+        signature_url,
+        signature_sha256,
+        signature_verified: true,
+        signature_verification_method: "re-verified during metadata recovery: xz --decompress --stdout piped to gpg --no-options --batch --no-auto-key-import --no-auto-key-retrieve --no-auto-key-locate --status-fd=1 --verify".into(),
+        trust_reference: "https://www.kernel.org/signature.html".into(),
+        signature_creation_date: signature_verification.signature_creation_date,
+        signature_timestamp: signature_verification.signature_timestamp,
+        signature_public_key_algorithm: signature_verification.public_key_algorithm,
+        signature_hash_algorithm: signature_verification.hash_algorithm,
+        signer_name: signature_verification.signer_name,
+        signer_primary_fingerprint: signature_verification.signer_primary_fingerprint,
+        gpg_version: provenance::command_version("gpg", &["--version"]),
+        xz_version: provenance::command_version("xz", &["--version"]),
+        curl_version: provenance::command_version("curl", &["--version"]),
+        tar_version: provenance::command_version("tar", &["--version"]),
+    };
+
+    let mut recorded_profile = p.clone();
+    recorded_profile.gpg_home = None;
+    let compiler_command = if p.ccache {
+        format!("ccache {}", p.compiler)
+    } else {
+        p.compiler.clone()
+    };
+    let build_manifest = BuildProvenance {
+        started_unix: None,
+        completed_unix: None,
+        duration_seconds: None,
+        metadata_generated_unix: generated_unix,
+        metadata_recovered: true,
+        recovery_note: Some(
+            "Metadata was reconstructed after the build command stopped before writing its manifest. The original build start/completion times, duration, host inventory, exact compiler/tool versions, config origin, and original command history were not persisted and are therefore not asserted. Source authenticity was re-verified against the pinned kernel.org signer allowlist. Matching hashes confirm that the staged image, config, and System.map (when present) match the surviving build-tree outputs; this recovery does not independently prove that no source-tree edits occurred after extraction."
+                .into(),
+        ),
+        recovery_actions: vec![
+            "make kernelrelease (validation only; no compilation)".into(),
+            "verify staged kernel image against the build-tree image SHA-256".into(),
+            "verify staged config and System.map against the build-tree files".into(),
+            "re-verify the cached kernel.org detached source signature".into(),
+            "hash the staged modules tree".into(),
+        ],
+        profile: recorded_profile,
+        compiler_command,
+        compiler_environment: if p.compiler == "clang" {
+            format!("CC={}; LLVM=1", if p.ccache { "ccache clang" } else { "clang" })
+        } else {
+            format!("CC={}", if p.ccache { "ccache gcc" } else { "gcc" })
+        },
+        compiler_version: None,
+        ccache_version: None,
+        make_version: None,
+        rustc_version: None,
+        config_origin: "unknown_recovered_from_existing_build_tree".into(),
+        effective_config_path: ".config".into(),
+        effective_config_sha256: effective_config_sha256.clone(),
+        commands: Vec::new(),
+    };
+
+    let artifacts = ArtifactProvenance {
+        kernel_release: release.clone(),
+        kernel_image: PathBuf::from("boot").join(&image_name).to_string_lossy().to_string(),
+        kernel_image_sha256: image_sha256.clone(),
+        system_map: if system_map_sha256.is_some() {
+            Some(PathBuf::from("boot").join(format!("System.map-{release}")).to_string_lossy().to_string())
+        } else {
+            None
+        },
+        system_map_sha256,
+        modules_directory: PathBuf::from("root/lib/modules").join(&release).to_string_lossy().to_string(),
+        modules_staged: true,
+        modules_tree_sha256: Some(modules_tree_sha256),
+        modules_file_count,
+        modules_total_bytes,
+    };
+
+    let manifest = BuildManifest {
+        schema_version: 2,
+        generated_unix,
+        application_version: env!("CARGO_PKG_VERSION"),
+        source: source_manifest,
+        build: build_manifest,
+        host: None,
+        artifacts,
+    };
+    provenance::write_json_atomic(&p.stage_dir.join("provenance.json"), &manifest)?;
+
+    let metadata = format!(
+        "version={version}\nlocalversion={}\nkernel_release={release}\nsource={}\nmetadata_recovered=true\nbuild_timing_known=false\nsource_signature_verified=true\nsource_signer={}\nsource_signer_fingerprint={}\nsource_archive_sha256={}\nsource_signature_sha256={}\neffective_config_sha256={}\nkernel_image={image_name}\nkernel_image_sha256={image_sha256}\nmodules_staged=true\nmodules_tree_sha256={}\nmodules_file_count={modules_file_count}\nmodules_total_bytes={modules_total_bytes}\nprovenance=provenance.json\n",
+        p.local_version,
+        p.source,
+        manifest.source.signer_name,
+        manifest.source.signer_primary_fingerprint,
+        manifest.source.archive_sha256,
+        manifest.source.signature_sha256,
+        effective_config_sha256,
+        manifest.artifacts.modules_tree_sha256.as_deref().unwrap_or(""),
+    );
+    fs::write(p.stage_dir.join("BUILD-METADATA.txt"), metadata)
+        .context("writing recovered BUILD-METADATA.txt")?;
+
+    println!("Recovered metadata written to {}", p.stage_dir.join("provenance.json").display());
+    println!("Build metadata written to {}", p.stage_dir.join("BUILD-METADATA.txt").display());
+    println!("No kernel compilation or modules_install operation was performed.");
+    println!("Note: original build timing and host/toolchain-at-build details are unavailable and marked as unknown.");
+    Ok(())
+}
+
 fn main()->Result<()> {
     let cli=Cli::parse();
     match cli.command {
@@ -862,6 +1164,7 @@ fn main()->Result<()> {
         Commands::Doctor{profile}=>doctor(&profile)?,
         Commands::Profile{file,create}=>profile(&file,create)?,
         Commands::Build{profile,dry_run}=>build(&profile,dry_run)?,
+        Commands::Finalize{profile,version}=>finalize(&profile,version.as_deref())?,
         Commands::Tune{profile,dry_run}=>tuning::tune(profile,dry_run)?,
         Commands::Revert{dry_run}=>tuning::revert(dry_run)?,
         Commands::Install{staged,yes}=>{
@@ -876,6 +1179,45 @@ fn main()->Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finalize_version_is_inferred_from_a_single_staged_release() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-finalize-version-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        let stage_dir = root.join("stage");
+        fs::create_dir_all(stage_dir.join("root/lib/modules/7.3.4-ko")).unwrap();
+
+        let profile = Profile {
+            stage_dir: stage_dir.clone(),
+            ..Profile::default()
+        };
+        assert_eq!(infer_finalize_version(&profile, None).unwrap(), "7.3.4");
+        assert_eq!(
+            infer_finalize_version(&profile, Some("7.3.4")).unwrap(),
+            "7.3.4"
+        );
+
+        fs::create_dir_all(stage_dir.join("root/lib/modules/7.3.5-ko")).unwrap();
+        assert!(infer_finalize_version(&profile, None).is_err());
+        assert_eq!(
+            infer_finalize_version(&profile, Some("7.3.4")).unwrap(),
+            "7.3.4"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn finalize_version_rejects_a_profile_version_mismatch() {
+        let profile = Profile {
+            version: "7.3.5".into(),
+            ..Profile::default()
+        };
+        assert!(infer_finalize_version(&profile, Some("7.3.4")).is_err());
+    }
 
     #[test]
     fn default_profile_passes_preflight_validation() {
