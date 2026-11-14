@@ -1,5 +1,7 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
+mod tuning;
+use tuning::Workload;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::{Path, PathBuf}, process::{Command, Stdio}, time::Duration};
@@ -141,7 +143,7 @@ fn main()->Result<()> {
         Commands::Sources=>sources(),
         Commands::Profile{file,create}=>profile(&file,create)?,
         Commands::Build{profile,dry_run}=>build(&profile,dry_run)?,
-        Commands::Install{staged,yes}=>{
+        Commands::Tune{profile,dry_run}=>tuning::tune(profile,dry_run)?,\n        Commands::Revert{dry_run}=>tuning::revert(dry_run)?,\n        Commands::Install{staged,yes}=>{
             let _=staged; let _=yes;
             bail!("installation/bootloader integration is intentionally not enabled in 0.1. Review staged artifacts and use your distribution's supported packaging tools; automated bootloader mutation will be added after distro-specific adapters and rollback checks.");
         }
