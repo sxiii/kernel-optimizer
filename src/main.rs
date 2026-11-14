@@ -52,22 +52,6 @@ impl Default for Profile {
     }}
 }
 
-fn output(program:&str,args:&[&str])->String {
-    Command::new(program).args(args).output().ok().filter(|o|o.status.success())
-        .map(|o|String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
-}
-fn read(path:&str)->String { fs::read_to_string(path).unwrap_or_default() }
-fn hardware()->Hardware {
-    let cpuinfo=read("/proc/cpuinfo");
-    let model=cpuinfo.lines().find_map(|l|l.strip_prefix("model name\t:").or_else(||l.strip_prefix("Hardware\t:")).map(str::trim)).unwrap_or("Unknown CPU").to_string();
-    let flags=cpuinfo.lines().find(|l|l.starts_with("flags")||l.starts_with("Features")).and_then(|l|l.split_once(':')).map(|(_,v)|v.split_whitespace().map(str::to_string).collect()).unwrap_or_default();
-    let mem=read("/proc/meminfo").lines().find(|l|l.starts_with("MemTotal:")).and_then(|l|l.split_whitespace().nth(1)).and_then(|v|v.parse().ok());
-    let pci=output("lspci",&["-nn"]).lines().map(str::to_string).collect();
-    let blocks=output("lsblk",&["-J","-o","NAME,TYPE,SIZE,MODEL,TRAN"]).parse::<serde_json::Value>().ok()
-        .and_then(|v|v["blockdevices"].as_array().cloned()).unwrap_or_default().iter().map(|v|format!("{} {} {} {}",v["name"].as_str().unwrap_or("?"),v["type"].as_str().unwrap_or("?"),v["size"].as_str().unwrap_or("?"),v["model"].as_str().unwrap_or(""))).collect();
-    let virt=output("systemd-detect-virt",&[]); 
-    Hardware { uname:output("uname",&["-r"]),architecture:output("uname",&["-m"]),cpu_model:model,logical_cpus:std::thread::available_parallelism().map(|x|x.get()).unwrap_or(1),cpu_flags:flags,memory_kib:mem,pci_devices:pci,block_devices:blocks,current_cmdline:read("/proc/cmdline").trim().into(),virtualization:if virt.is_empty(){"none".into()}else{virt} }
-}
 fn sources() {
     println!("SOURCE            TRACK / PURPOSE");
     println!("linux             Latest stable upstream kernel (kernel.org)");
@@ -146,12 +130,6 @@ fn main()->Result<()> {
     let cli=Cli::parse();
     match cli.command {
         Commands::Inspect=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
-        Commands::Hardware=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
-        Commands::Benchmark{output,iterations,profile}=>{
-            let report=benchmark::run(&output,iterations,&profile)?;
-            println!("{}",serde_json::to_string_pretty(&report)?);
-            eprintln!("Saved benchmark report to {}",output.display());
-        },
         Commands::Hardware=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
         Commands::Benchmark{output,iterations,profile}=>{
             let report=benchmark::run(&output,iterations,&profile)?;
