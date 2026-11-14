@@ -37,9 +37,15 @@ fn cpu_value(text: &str, key: &str) -> Option<String> {
 }
 fn microarch(vendor: &str, family: Option<&str>, model: Option<&str>) -> String {
     let (Some(family), Some(model)) = (family, model) else { return "unknown".into() };
-    let (Ok(family), Ok(model)) = (family.parse::<u32>(), u32::from_str_radix(model.trim_start_matches("0x"), 16).or_else(|_| model.parse())) else { return "unknown".into() };
+    let Ok(family) = family.parse::<u32>() else { return "unknown".into() };
+    let model = if let Some(hex) = model.strip_prefix("0x") {
+        u32::from_str_radix(hex, 16)
+    } else {
+        model.parse::<u32>()
+    };
+    let Ok(model) = model else { return "unknown".into() };
     if vendor == "AuthenticAMD" && family == 0x19 {
-        return match model { 0x00..=0x0f => "Zen 3 (Family 19h)".into(), 0x10..=0x1f => "Zen 4 (Family 19h)".into(), 0x60..=0x7f => "Zen 4/5 family (model-dependent)".into(), 0xa0..=0xaf => "Zen 5 (Family 1Ah-like model mapping requires CPUID)".into(), _ => "AMD Family 19h (Zen 3/4/5 variant; exact CPUID mapping needed)".into() };
+        return match model { 0x00..=0x0f => "Zen 3 (Family 19h)".into(), 0x10..=0x1f => "Zen 4 (Family 19h)".into(), 0x60..=0x7f => "Zen 4/5 family (model-dependent)".into(), 0xa0..=0xaf => "AMD Family 19h model 0xA* (microarchitecture requires full CPUID decode)".into(), _ => "AMD Family 19h (Zen 3/4/5 variant; exact CPUID mapping needed)".into() };
     }
     if vendor == "AuthenticAMD" {
         return match family { 0x17 => "Zen / Zen+ (Family 17h)".into(), 0x18 => "AMD Family 18h".into(), 0x1a => "AMD Family 1Ah".into(), _ => format!("AMD family {family:#x}") };
@@ -120,6 +126,12 @@ mod tests {
     #[test] fn classifies_amd_zen_families() {
         assert!(microarch("AuthenticAMD", Some("23"), Some("1")).contains("Zen"));
         assert!(microarch("AuthenticAMD", Some("25"), Some("0x61")).contains("Zen"));
+    }
+    #[test] fn parses_proc_cpuinfo_decimal_model() {
+        assert!(microarch("AuthenticAMD", Some("25"), Some("97")).contains("Zen 4/5"));
+    }
+    #[test] fn classifies_amd_zen5_family() {
+        assert!(microarch("AuthenticAMD", Some("26"), Some("1")).contains("Zen 5"));
     }
     #[test] fn unknown_cpu_is_safe() { assert_eq!(microarch("unknown", None, None), "unknown"); }
 }
