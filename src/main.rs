@@ -20,8 +20,28 @@ enum Commands {
     Sources,
     /// Print structured hardware and power-management inventory.
     Hardware,
-    /// Run repeatable lightweight benchmark probes and write JSON results.
-    Benchmark { #[arg(long, default_value="kernel-optimizer-benchmark.json")] output: PathBuf, #[arg(long, default_value_t=5)] iterations: usize, #[arg(long, default_value="manual")] profile: String },
+    /// Run CPU and memory benchmarks; optionally test an iperf3 server.
+    Benchmark {
+        #[arg(long, default_value="kernel-optimizer-benchmark.json")]
+        output: PathBuf,
+        #[arg(long, default_value_t=5)]
+        iterations: usize,
+        #[arg(long, default_value="manual")]
+        profile: String,
+        #[arg(long, default_value_t=5_000_000)]
+        cpu_rounds: u64,
+        #[arg(long, default_value_t=64)]
+        memory_mib: usize,
+        #[arg(long)]
+        iperf_server: Option<String>,
+    },
+    /// Compare two saved benchmark reports.
+    Compare {
+        #[arg(long)]
+        baseline: PathBuf,
+        #[arg(long)]
+        candidate: PathBuf,
+    },
     /// Create or print an example build profile.
     Profile { #[arg(long, default_value="kernel-optimizer.toml")] file: PathBuf, #[arg(long)] create: bool },
     /// Fetch, configure, compile and stage a kernel. Installation requires a separate explicit step.
@@ -131,10 +151,13 @@ fn main()->Result<()> {
     match cli.command {
         Commands::Inspect=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
         Commands::Hardware=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
-        Commands::Benchmark{output,iterations,profile}=>{
-            let report=benchmark::run(&output,iterations,&profile)?;
+        Commands::Benchmark{output,iterations,profile,cpu_rounds,memory_mib,iperf_server}=>{
+            let report=benchmark::run(&output,iterations,&profile,cpu_rounds,memory_mib,iperf_server.as_deref())?;
             println!("{}",serde_json::to_string_pretty(&report)?);
             eprintln!("Saved benchmark report to {}",output.display());
+        },
+        Commands::Compare{baseline,candidate}=>{
+            print!("{}",benchmark::compare(&baseline,&candidate)?);
         },
         Commands::Sources=>sources(),
         Commands::Profile{file,create}=>profile(&file,create)?,
