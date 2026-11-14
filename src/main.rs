@@ -474,23 +474,32 @@ mod tests {
 
     #[test]
     fn profile_validation_rejects_unsupported_compiler_and_sources() {
-        let mut profile = Profile::default();
-        profile.compiler = "zig".into();
+        let profile = Profile {
+            compiler: "zig".into(),
+            ..Profile::default()
+        };
         assert!(validate_profile(&profile).is_err());
 
-        let mut profile = Profile::default();
-        profile.source = "linux-zen".into();
+        let profile = Profile {
+            source: "linux-zen".into(),
+            ..Profile::default()
+        };
         assert!(validate_profile(&profile).is_err());
     }
 
     #[test]
     fn profile_validation_rejects_unsafe_local_version_and_shared_paths() {
-        let mut profile = Profile::default();
-        profile.local_version = "-custom/../../boot".into();
+        let profile = Profile {
+            local_version: "-custom/../../boot".into(),
+            ..Profile::default()
+        };
         assert!(validate_profile(&profile).is_err());
 
-        let mut profile = Profile::default();
-        profile.stage_dir = profile.build_dir.clone();
+        let defaults = Profile::default();
+        let profile = Profile {
+            stage_dir: defaults.build_dir.clone(),
+            ..defaults
+        };
         assert!(validate_profile(&profile).is_err());
     }
 }
