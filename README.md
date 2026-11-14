@@ -346,9 +346,11 @@ the surviving build-tree files, checks the module indexes, re-verifies the cache
 kernel.org detached signature against the pinned signer allowlist, and hashes the
 staged modules tree before writing the two metadata files.
 
-The command requires the existing source/build tree, staged artifacts, cached
-`linux-X.Y.Z.tar.xz` archive and `linux-X.Y.Z.tar.sign` signature. If only one
-matching module release exists under the staging root, `--version` may be omitted.
+The command requires the existing source/build tree, staged artifacts and cached
+`linux-X.Y.Z.tar.xz` archive. If the detached `linux-X.Y.Z.tar.sign` signature is
+missing or empty, it downloads that small file from the matching kernel.org release
+directory, then verifies it against the pinned signer allowlist. If only one matching
+module release exists under the staging root, `--version` may be omitted.
 Recovered manifests use schema version 2 and explicitly mark original build timing,
 host inventory, compiler versions and command history as unavailable rather than
 inventing them. Source signature verification and staged artifact hashes are
