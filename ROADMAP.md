@@ -17,12 +17,17 @@ sufficient proof that a machine can boot it.
 
 ## Priority 2 — Source integrity and build provenance
 
-- [ ] Verify kernel.org source signatures using a pinned, documented maintainer-key
-  trust process; do not silently trust a key fetched from the same download endpoint.
-- [ ] Record source archive SHA-256, signature verification result, compiler/tool versions,
-  effective kernel config hash, build command and build timestamp in build metadata.
-- [ ] Preserve a machine-readable manifest for the staged image and modules.
-- [ ] Add deterministic checks that the staged image release matches the staged module tree.
+- [x] Verify kernel.org source tarball signatures against a pinned maintainer-key
+  allowlist, and fail closed for missing, unknown, expired or revoked signatures.
+- [x] Record source archive/signature hashes, signer identity and fingerprint, signature
+  time/algorithms, tool versions, effective kernel config hash, build commands and timing.
+- [x] Write a machine-readable provenance manifest with kernel image, System.map and
+  modules-tree hashes plus host/build metadata.
+- [x] Re-extract the verified archive on each build, preserving only the previous .config.
+- [ ] Add an end-to-end verification test using a test keyring and deliberately altered
+  archives/signatures; keep the test signer separate from the production allowlist.
+- [ ] Add a documented maintenance procedure for reviewing signer-key revocations and
+  updating the pinned fingerprint set from kernel.org's published source.
 
 ## Priority 3 — Distribution packaging (Arch/Garuda first)
 
