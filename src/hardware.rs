@@ -105,7 +105,7 @@ fn block_devices() -> Vec<BlockDevice> {
     }
     let mut out = Vec::new(); walk(&value["blockdevices"], &mut out); out
 }
-fn detect_virtualization() -> String {
+pub fn detect_virtualization() -> String {
     let detected = cmd("systemd-detect-virt", &[]);
     if !detected.is_empty() && detected != "none" {
         return detected;
