@@ -282,18 +282,65 @@ pub fn tune(profile: Workload, dry_run: bool) -> Result<()> {
 pub fn revert(dry_run: bool) -> Result<()> {
     println!("Would remove: {SYSCTL_PATH}");
     println!("Would remove: {UDEV_PATH}");
-    if dry_run { println!("Dry run: no system files changed."); return Ok(()); }
-    if !is_root() { bail!("reverting system tuning requires root; rerun with sudo (or use --dry-run)"); }
-    for path in [SYSCTL_PATH, UDEV_PATH] {
-        match fs::remove_file(path) {
-            Ok(()) => println!("Removed {path}"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("Already absent: {path}"),
-            Err(e) => return Err(e).with_context(|| format!("removing {path}")),
-        }
+    if dry_run {
+        println!("Dry run: no system files changed.");
+        return Ok(());
     }
-    let status = Command::new("sysctl").arg("--system").status().context("reloading sysctl configuration")?;
-    if !status.success() { bail!("sysctl --system reported an error after removing optimizer settings"); }
-    let _ = Command::new("udevadm").args(["control", "--reload-rules"]).status();
-    println!("Optimizer drop-ins removed. Note: this restores values from remaining sysctl configuration files, not necessarily the exact pre-optimization runtime state.");
+    if !is_root() {
+        bail!("reverting system tuning requires root; rerun with sudo (or use --dry-run)");
+    }
+
+    let previous_sysctl = previous_file(SYSCTL_PATH)?;
+    let previous_udev = previous_file(UDEV_PATH)?;
+
+    let removal_result = (|| -> Result<()> {
+        for path in [SYSCTL_PATH, UDEV_PATH] {
+            match fs::remove_file(path) {
+                Ok(()) => println!("Removed {path}"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    println!("Already absent: {path}");
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("removing {path}"));
+                }
+            }
+        }
+
+        let status = Command::new("sysctl")
+            .arg("--system")
+            .status()
+            .context("reloading sysctl configuration")?;
+        if !status.success() {
+            bail!("sysctl --system reported an error after removing optimizer settings");
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = removal_result {
+        restore_file(SYSCTL_PATH, previous_sysctl.as_deref())?;
+        restore_file(UDEV_PATH, previous_udev.as_deref())?;
+        let _ = Command::new("sysctl").arg("--system").status();
+        let _ = Command::new("udevadm")
+            .args(["control", "--reload-rules"])
+            .status();
+        return Err(error).context("revert failed; restored previous optimizer drop-ins");
+    }
+
+    match Command::new("udevadm")
+        .args(["control", "--reload-rules"])
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!(
+            "Warning: udev rule reload returned {status}; the optimizer rule file was removed"
+        ),
+        Err(error) => eprintln!(
+            "Warning: could not reload udev rules after revert: {error}"
+        ),
+    }
+
+    println!(
+        "Optimizer drop-ins removed. This reloads the remaining sysctl files; it does not guarantee restoration of runtime changes made concurrently by other services."
+    );
     Ok(())
 }
