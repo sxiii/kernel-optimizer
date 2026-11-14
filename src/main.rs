@@ -398,11 +398,9 @@ fn refresh_source_tree(archive: &Path, source: &Path, build_dir: &Path, version:
     }
     let backup = build_dir.join(format!(".kernel-optimizer-old-source-{}-{stamp}", std::process::id()));
     let had_source = source_metadata.is_some();
-    if had_source {
-        if let Err(error) = fs::rename(source, &backup) {
-            let _ = fs::remove_dir_all(&temporary);
-            return Err(error).with_context(|| format!("moving previous source tree {} aside", source.display()));
-        }
+    if had_source && let Err(error) = fs::rename(source, &backup) {
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(error).with_context(|| format!("moving previous source tree {} aside", source.display()));
     }
     if let Err(error) = fs::rename(&extracted_root, source) {
         if had_source {
@@ -411,15 +409,15 @@ fn refresh_source_tree(archive: &Path, source: &Path, build_dir: &Path, version:
         let _ = fs::remove_dir_all(&temporary);
         return Err(error).with_context(|| format!("promoting fresh source tree to {}", source.display()));
     }
-    if let Some(config) = saved_config.as_ref() {
-        if let Err(error) = fs::write(source.join(".config"), config) {
-            let _ = fs::remove_dir_all(source);
-            if had_source {
-                let _ = fs::rename(&backup, source);
-            }
-            let _ = fs::remove_dir_all(&temporary);
-            return Err(error).context("restoring the prior kernel .config into the clean source tree");
+    if let Some(config) = saved_config.as_ref()
+        && let Err(error) = fs::write(source.join(".config"), config)
+    {
+        let _ = fs::remove_dir_all(source);
+        if had_source {
+            let _ = fs::rename(&backup, source);
         }
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(error).context("restoring the prior kernel .config into the clean source tree");
     }
     fs::remove_dir_all(&temporary)?;
     if had_source {
