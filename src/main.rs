@@ -103,7 +103,9 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     let url=format!("https://cdn.kernel.org/pub/linux/kernel/v{}.x/linux-{}.tar.xz",p.version.split('.').next().unwrap(),p.version);
     println!("Kernel: {}{}",p.version,p.local_version);
     println!("CPU: {}",hardware().cpu_model);
-    println!("Jobs: {}",p.jobs);\n    println!("Compiler: {} (ccache: {}, mold requested: {})",p.compiler,p.ccache,p.use_mold);\n    println!("Optimization profile: {} (currently informational; no unsafe CPU-specific flags injected)",p.optimization);
+    println!("Jobs: {}",p.jobs);
+    println!("Compiler: {} (ccache: {}, mold requested: {})",p.compiler,p.ccache,p.use_mold);
+    println!("Optimization profile: {} (currently informational; no unsafe CPU-specific flags injected)",p.optimization);
     println!("Source: {url}");
     println!("Build dir: {}",src.display());
     if dry {println!("Dry run only. No files changed.");return Ok(());}
@@ -143,7 +145,9 @@ fn main()->Result<()> {
         Commands::Sources=>sources(),
         Commands::Profile{file,create}=>profile(&file,create)?,
         Commands::Build{profile,dry_run}=>build(&profile,dry_run)?,
-        Commands::Tune{profile,dry_run}=>tuning::tune(profile,dry_run)?,\n        Commands::Revert{dry_run}=>tuning::revert(dry_run)?,\n        Commands::Install{staged,yes}=>{
+        Commands::Tune{profile,dry_run}=>tuning::tune(profile,dry_run)?,
+        Commands::Revert{dry_run}=>tuning::revert(dry_run)?,
+        Commands::Install{staged,yes}=>{
             let _=staged; let _=yes;
             bail!("installation/bootloader integration is intentionally not enabled in 0.1. Review staged artifacts and use your distribution's supported packaging tools; automated bootloader mutation will be added after distro-specific adapters and rollback checks.");
         }
