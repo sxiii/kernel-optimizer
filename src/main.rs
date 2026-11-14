@@ -1,8 +1,12 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
+mod tuning;
+use tuning::Workload;
+mod hardware;
+mod benchmark;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::{Path, PathBuf}, process::{Command, Stdio}, time::Duration};
+use std::{fs, path::{Path, PathBuf}, process::Command, time::Duration};
 
 #[derive(Parser)]
 #[command(name="kernel-optimizer", version, about="Hardware-aware Linux kernel builder")]
@@ -14,20 +18,22 @@ enum Commands {
     Inspect,
     /// List supported upstream and optimized kernel source tracks.
     Sources,
+    /// Print structured hardware and power-management inventory.
+    Hardware,
+    /// Run repeatable lightweight benchmark probes and write JSON results.
+    Benchmark { #[arg(long, default_value="kernel-optimizer-benchmark.json")] output: PathBuf, #[arg(long, default_value_t=5)] iterations: usize, #[arg(long, default_value="manual")] profile: String },
     /// Create or print an example build profile.
     Profile { #[arg(long, default_value="kernel-optimizer.toml")] file: PathBuf, #[arg(long)] create: bool },
     /// Fetch, configure, compile and stage a kernel. Installation requires a separate explicit step.
     Build { #[arg(long, default_value="kernel-optimizer.toml")] profile: PathBuf, #[arg(long)] dry_run: bool },
+    /// Generate/apply workload-aware sysctl and I/O scheduler settings.
+    Tune { #[arg(long, value_enum, default_value="desktop")] profile: Workload, #[arg(long)] dry_run: bool },
+    /// Remove optimizer-managed sysctl and udev drop-ins.
+    Revert { #[arg(long)] dry_run: bool },
     /// Install a previously staged kernel through the detected package/boot integration.
     Install { #[arg(long)] staged: Option<PathBuf>, #[arg(long)] yes: bool },
 }
 
-#[derive(Debug, Serialize)]
-struct Hardware {
-    uname: String, architecture: String, cpu_model: String, logical_cpus: usize,
-    cpu_flags: Vec<String>, memory_kib: Option<u64>, pci_devices: Vec<String>,
-    block_devices: Vec<String>, current_cmdline: String, virtualization: String,
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Profile {
     source: String, version: String, local_version: String, jobs: usize,
@@ -102,6 +108,8 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     println!("Kernel: {}{}",p.version,p.local_version);
     println!("CPU: {}",hardware().cpu_model);
     println!("Jobs: {}",p.jobs);
+    println!("Compiler: {} (ccache: {}, mold requested: {})",p.compiler,p.ccache,p.use_mold);
+    println!("Optimization profile: {} (currently informational; no unsafe CPU-specific flags injected)",p.optimization);
     println!("Source: {url}");
     println!("Build dir: {}",src.display());
     if dry {println!("Dry run only. No files changed.");return Ok(());}
@@ -137,10 +145,24 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
 fn main()->Result<()> {
     let cli=Cli::parse();
     match cli.command {
-        Commands::Inspect=>println!("{}",serde_json::to_string_pretty(&hardware())?),
+        Commands::Inspect=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
+        Commands::Hardware=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
+        Commands::Benchmark{output,iterations,profile}=>{
+            let report=benchmark::run(&output,iterations,&profile)?;
+            println!("{}",serde_json::to_string_pretty(&report)?);
+            eprintln!("Saved benchmark report to {}",output.display());
+        },
+        Commands::Hardware=>println!("{}",serde_json::to_string_pretty(&hardware::detect())?),
+        Commands::Benchmark{output,iterations,profile}=>{
+            let report=benchmark::run(&output,iterations,&profile)?;
+            println!("{}",serde_json::to_string_pretty(&report)?);
+            eprintln!("Saved benchmark report to {}",output.display());
+        },
         Commands::Sources=>sources(),
         Commands::Profile{file,create}=>profile(&file,create)?,
         Commands::Build{profile,dry_run}=>build(&profile,dry_run)?,
+        Commands::Tune{profile,dry_run}=>tuning::tune(profile,dry_run)?,
+        Commands::Revert{dry_run}=>tuning::revert(dry_run)?,
         Commands::Install{staged,yes}=>{
             let _=staged; let _=yes;
             bail!("installation/bootloader integration is intentionally not enabled in 0.1. Review staged artifacts and use your distribution's supported packaging tools; automated bootloader mutation will be added after distro-specific adapters and rollback checks.");
