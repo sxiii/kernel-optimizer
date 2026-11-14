@@ -147,3 +147,60 @@ caused by a single sysctl.
 
 GitHub Actions checks Rust with Clippy and tests. A separate
 ShellCheck/shfmt job runs on shell scripts if any are introduced.
+
+
+## Hardware report and recommendations
+
+```sh
+kernel-optimizer hardware
+kernel-optimizer recommend --profile desktop
+kernel-optimizer recommend --profile laptop
+kernel-optimizer recommend --profile server
+kernel-optimizer recommend --profile gaming
+```
+
+The hardware report includes CPU vendor/family/model and a conservative microarchitecture
+label, feature flags, logical/physical topology, RAM, virtualization, PCI GPU and network
+controllers, block-device media type and available I/O schedulers, plus cpufreq policies
+(governor, available governors, EPP and exposed frequency limits/current frequency).
+
+Recommendations are read-only. They explain why a per-device scheduler might be suitable,
+show the scheduler choices each disk actually advertises, and describe CPU power-policy
+trade-offs for the selected workload. They do not change governors, Kconfig, sysfs, or
+sysctl values. Microarchitecture decoding is intentionally marked as unknown or
+family/model-specific when /proc/cpuinfo is insufficient for an exact CPUID interpretation.
+
+## Benchmark and compare
+
+The benchmark command runs repeatable single-thread integer-throughput and memory-copy
+tests. Optional disk and network tests require explicit targets:
+
+```sh
+# Baseline report on the currently running kernel
+kernel-optimizer benchmark --profile baseline --output baseline.json
+
+# Candidate report after booting the other kernel/settings
+kernel-optimizer benchmark --profile candidate --output candidate.json
+
+# Optional: test sequential direct-I/O on a filesystem directory (fio required)
+kernel-optimizer benchmark --profile candidate --fio-path /mnt/test-ssd \
+  --fio-size-mib 256 --fio-runtime-seconds 10 --output candidate-ssd.json
+
+# Optional: run iperf3 against a server you control
+kernel-optimizer benchmark --profile candidate --iperf-server 192.0.2.10
+
+# Compare two reports with identical workloads
+kernel-optimizer compare --baseline baseline.json --candidate candidate.json
+```
+
+The fio test creates and removes a uniquely named temporary file in the supplied directory;
+it does not overwrite a raw device or an existing file. It requires space for the selected
+test-file size. The iperf3 test connects only to the server explicitly supplied by the user.
+CPU and memory tests use the current process's available CPU set and a bounded memory buffer.
+
+Reports record the kernel, architecture, CPU model/microarchitecture, logical CPU count,
+RAM and cpufreq governors. The comparison command checks hardware/governor metadata and
+requires matching workload parameters before comparing each metric. A higher throughput
+number is better, but results remain sensitive to temperature, power limits, background
+load, storage cache and network conditions. Repeat tests and compare medians; do not treat
+small differences as statistically meaningful.
