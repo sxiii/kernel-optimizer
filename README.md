@@ -15,7 +15,7 @@ The running kernel and bootloader are not modified by the build command.
 - [x] Hardware inventory and workload-aware, read-only recommendations.
 - [x] Interactive read-only terminal dashboard.
 - [x] Upstream stable kernel discovery, configurable build profiles, and staged builds.
-- [x] Staged kernel image verification and SHA-256 build metadata.
+- [x] Staged kernel image verification, pinned OpenPGP source-signature verification, and SHA-256 build provenance.
 - [x] Read-only build preflight (doctor) for dependencies, config source and disk space.
 - [x] Workload-aware sysctl/I/O-scheduler preview, apply and revert.
 - [x] CPU, memory, optional fio/iperf3 benchmarks and report comparison.
@@ -24,7 +24,6 @@ The running kernel and bootloader are not modified by the build command.
 **Next**
 
 - [ ] Add broader hardware-independent tests for build staging, tuning rollback and benchmark edge cases.
-- [ ] Verify downloaded kernel source against upstream signatures/checksums and record provenance.
 - [ ] Add distro packaging adapters (Arch/Garuda first) that produce installable packages without changing the boot path.
 - [ ] Add initramfs, module-signing and Secure Boot preflight/integration.
 - [ ] Add boot-entry creation only with a known-good fallback and tested rollback.
@@ -37,13 +36,78 @@ bootable system by itself.
 
 ## Requirements
 
-Rust stable, a C toolchain, make, curl, xz, tar, bc, bison, flex, openssl development headers, elfutils, pahole, perl, python and the usual kernel build dependencies. On Arch/Garuda, start with:
+Rust stable, a C toolchain, make, curl, xz, tar, GnuPG 2.4 or later, bc, bison, flex, OpenSSL development headers, elfutils, pahole, perl, python and the usual kernel build dependencies. On Arch/Garuda, start with:
 
 ```sh
-sudo pacman -S --needed base-devel rust curl xz bc bison flex openssl elfutils pahole perl python ccache
+sudo pacman -S --needed base-devel rust curl xz gnupg bc bison flex openssl elfutils pahole perl python ccache
 ```
 
 Optional tools such as `lspci`, `lsblk`, `zcat` and `menuconfig` enhance inspection/configuration.
+
+## Verified upstream kernel sources
+
+The upstream builder downloads both `linux-X.Y.Z.tar.xz` and its detached
+`linux-X.Y.Z.tar.sign` signature. Kernel.org signs the **uncompressed tar stream**,
+not the compressed XZ file. The application therefore streams
+`xz --decompress --stdout` into GnuPG's detached-signature verifier.
+
+Verification is mandatory. It is not possible to disable it in the profile. The
+GnuPG machine-readable `VALIDSIG` result must identify exactly one primary key
+from this compiled-in allowlist:
+
+| Release signer | Pinned primary-key fingerprint |
+|---|---|
+| Linus Torvalds | `ABAF11C65A2970B130ABE3C479BE3E4300411886` |
+| Greg Kroah-Hartman | `647F28654894E3BD457199BE38DBBDC86092693E` |
+| Sasha Levin | `E27E5D8A3403A2EF66873BBCDEA66FF797772CDC` |
+| Ben Hutchings | `AC2B29BD34A6AFDDB3F68F35E7BFC8EC95861109` |
+
+The fingerprints are maintained in `src/provenance.rs` and are based on the
+[official kernel.org signature guidance](https://www.kernel.org/signature.html).
+A key downloaded from the same server as the tarball is **not** trusted just
+because it was imported. The application compares the full primary fingerprint
+against the allowlist. It also disables automatic key retrieval during verification
+and fails on bad, expired or revoked signature status.
+
+### Prepare the GnuPG keyring once
+
+Import the signer keys into the keyring of the unprivileged account that will run
+the build. Kernel.org documents WKD lookup with GnuPG; for example:
+
+```sh
+gpg --locate-keys torvalds@kernel.org gregkh@kernel.org
+gpg --fingerprint torvalds@kernel.org gregkh@kernel.org
+
+# When using a dedicated keyring configured as gpg_home:
+gpg --homedir /path/to/keyring --locate-keys torvalds@kernel.org gregkh@kernel.org
+gpg --homedir /path/to/keyring --fingerprint torvalds@kernel.org gregkh@kernel.org
+```
+
+Compare the **complete primary fingerprints** with the allowlist above and with
+kernel.org's published page before relying on an imported key. GnuPG may display
+an owner-trust warning for a key that has not been assigned local trust; the
+application does not use owner-trust as identity proof, but it does require a
+cryptographically valid signature from one of the exact pinned primary keys.
+Do not use a keyserver result or a short key ID as a substitute for checking the
+full fingerprint.
+
+By default, the application uses the current user's normal GnuPG home. Set
+`gpg_home` in `kernel-optimizer.toml` to use a dedicated keyring. Do not run the
+build with `sudo` merely to gain access to a keyring; prepare the keyring for the
+same user that builds the kernel.
+
+The signer allowlist is intentionally static and fail-closed. If kernel.org changes
+its published release signers or fingerprints, the application will reject a new
+signer until the allowlist is reviewed and updated in a code change.
+
+### Clean extraction and local configuration
+
+After signature verification, each build extracts a fresh source tree from the
+verified archive. It preserves only the previous `.config`; edits to source files
+or local patches inside the extracted tree are discarded. This prevents unverified
+changes left in a reused build directory from being compiled as if they were part
+of the signed release. Custom patch sets need a future explicit, separately
+verified source-adapter workflow.
 
 ## Build the application
 
@@ -80,6 +144,8 @@ stage_dir = "/var/tmp/kernel-optimizer/stage"
 enable_lto = false
 enable_bpf = true
 menuconfig = false
+# Optional: use a dedicated GnuPG keyring instead of the current user keyring.
+# gpg_home = "/home/your-user/.gnupg"
 ```
 
 Builds can take considerable time and disk space. Use a dedicated filesystem with ample free space. Don't select `-march=native` for a kernel intended to boot on other machines. The `optimization` field is presently descriptive and does not silently alter kernel compiler flags.
@@ -239,13 +305,26 @@ edit kernel configuration, or run privileged commands.
 
 ## Kernel build staging verification
 
-After compiling, the build pipeline runs `make kernelrelease`, locates the matching
-staged kernel image, checks that it is non-empty, computes its SHA-256 digest, and
-records the image name, release, digest and module-staging status in
-`BUILD-METADATA.txt`. If more than one image exists and the newly built release
-cannot be identified, verification fails rather than silently selecting an older
-image. A checksum detects accidental corruption; it is not a signature or proof
-of source authenticity.
+Before extracting or compiling, the builder verifies the detached signature against
+the pinned kernel.org signer fingerprints and records the source archive and
+signature SHA-256 hashes. After compiling, it runs `make kernelrelease`, locates
+the matching staged kernel image, hashes the effective `.config`, image,
+`System.map` (when present), and staged modules tree, and writes both
+`BUILD-METADATA.txt` and a machine-readable `provenance.json`.
+
+The JSON manifest records the source and signature URLs/hashes, signer identity and
+primary fingerprint, signature creation time and algorithm identifiers, GnuPG/XZ/
+curl/tar versions, profile (without the private GnuPG home path), compiler and
+ccache versions, make/rustc versions, build timestamps and commands, host kernel/
+architecture/CPU, effective config hash/origin, kernel release and artifact hashes.
+The modules tree hash uses the documented internal `sha256-tree-v1` encoding;
+it hashes relative paths, entry types, file contents and symlink targets without
+following symlinks.
+
+These records improve traceability; they do **not** claim a reproducible build,
+prove the compiler or host was uncompromised, or replace Secure Boot/module
+signing. A checksum detects later artifact changes; source authenticity comes
+from the verified detached developer signature.
 
 The build remains staged outside the live boot path. Initramfs generation,
 distribution package creation, module signing, Secure Boot enrollment, bootloader
