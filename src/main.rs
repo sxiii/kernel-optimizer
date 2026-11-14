@@ -185,6 +185,82 @@ fn kernel_release(source: &Path) -> Result<String> {
     Ok(release)
 }
 
+fn kernel_image_candidates(architecture: &str) -> Result<&'static [&'static str]> {
+    match architecture {
+        "x86_64" | "x86" => Ok(&["arch/x86/boot/bzImage"]),
+        "aarch64" => Ok(&["arch/arm64/boot/Image", "arch/arm64/boot/Image.gz"]),
+        "arm" => Ok(&["arch/arm/boot/zImage", "arch/arm/boot/Image"]),
+        "riscv64" => Ok(&["arch/riscv/boot/Image", "arch/riscv/boot/Image.gz"]),
+        "powerpc64" | "powerpc64le" => Ok(&["arch/powerpc/boot/zImage"]),
+        "s390x" => Ok(&["arch/s390/boot/bzImage"]),
+        other => bail!(
+            "automatic boot-image staging is not yet supported for architecture '{other}'"
+        ),
+    }
+}
+
+// Do not call the kernel's "make install" target here. On distributions such as
+// Arch it invokes installkernel/kernel-install hooks, which may run dracut against
+// the live host's /lib/modules tree instead of this build's staged module tree.
+fn stage_kernel_boot_artifacts(
+    source: &Path,
+    boot_dir: &Path,
+    release: &str,
+    architecture: &str,
+) -> Result<String> {
+    let candidates = kernel_image_candidates(architecture)?;
+    let image_source = candidates
+        .iter()
+        .map(|relative| source.join(relative))
+        .find(|candidate| candidate.is_file())
+        .with_context(|| {
+            format!(
+                "could not find a built kernel image for {architecture}; checked: {}",
+                candidates.join(", ")
+            )
+        })?;
+
+    fs::create_dir_all(boot_dir)
+        .with_context(|| format!("creating staged boot directory {}", boot_dir.display()))?;
+
+    let image_name = format!("vmlinuz-{release}");
+    let image_destination = boot_dir.join(&image_name);
+    fs::copy(&image_source, &image_destination).with_context(|| {
+        format!(
+            "copying built kernel image {} to {}",
+            image_source.display(),
+            image_destination.display()
+        )
+    })?;
+
+    let config_source = source.join(".config");
+    if !config_source.is_file() {
+        bail!("built kernel configuration is missing: {}", config_source.display());
+    }
+    let config_destination = boot_dir.join(format!("config-{release}"));
+    fs::copy(&config_source, &config_destination).with_context(|| {
+        format!(
+            "copying kernel config {} to {}",
+            config_source.display(),
+            config_destination.display()
+        )
+    })?;
+
+    let system_map_source = source.join("System.map");
+    if system_map_source.is_file() {
+        let system_map_destination = boot_dir.join(format!("System.map-{release}"));
+        fs::copy(&system_map_source, &system_map_destination).with_context(|| {
+            format!(
+                "copying System.map {} to {}",
+                system_map_source.display(),
+                system_map_destination.display()
+            )
+        })?;
+    }
+
+    Ok(image_name)
+}
+
 fn verify_staged_kernel(stage: &Path, release: &str) -> Result<(String, String, bool)> {
     let boot_dir = stage.join("boot");
     let entries = fs::read_dir(&boot_dir)
@@ -623,7 +699,13 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     fs::create_dir_all(&p.stage_dir)?;
     let release = kernel_release(&src)?;
     run_checked(Command::new("make").current_dir(&src).arg("modules_install").env("INSTALL_MOD_PATH",p.stage_dir.join("root")))?;
-    run_checked(Command::new("make").current_dir(&src).arg("install").env("INSTALL_PATH",p.stage_dir.join("boot")))?;
+    let staged_image_name = stage_kernel_boot_artifacts(
+        &src,
+        &p.stage_dir.join("boot"),
+        &release,
+        std::env::consts::ARCH,
+    )?;
+    println!("Staged kernel image: {staged_image_name} (distribution install hooks were not run)");
     let (image_name, image_sha256, modules_staged) = verify_staged_kernel(&p.stage_dir, &release)?;
     let image_relative=PathBuf::from("boot").join(&image_name).to_string_lossy().to_string();
     let system_map_path=p.stage_dir.join("boot").join(format!("System.map-{release}"));
@@ -679,7 +761,7 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
         format!("make -j{}",p.jobs),
         "make kernelrelease".into(),
         format!("make modules_install INSTALL_MOD_PATH={}",p.stage_dir.join("root").display()),
-        format!("make install INSTALL_PATH={}",p.stage_dir.join("boot").display()),
+        format!("copy built kernel image, .config and System.map into {}",p.stage_dir.join("boot").display()),
     ]);
     let build_manifest=BuildProvenance {
         started_unix,
@@ -836,6 +918,49 @@ mod tests {
             ..defaults
         };
         assert!(validate_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn boot_artifacts_are_copied_to_stage_without_install_hooks() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-boot-stage-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        let source = root.join("source");
+        let stage = root.join("stage");
+        let image_relative = kernel_image_candidates(std::env::consts::ARCH).unwrap()[0];
+        let image_source = source.join(image_relative);
+        fs::create_dir_all(image_source.parent().unwrap()).unwrap();
+        fs::write(&image_source, b"test kernel image").unwrap();
+        fs::write(source.join(".config"), b"CONFIG_TEST=y\n").unwrap();
+        fs::write(source.join("System.map"), b"test system map\n").unwrap();
+
+        let release = "6.1.1-ko";
+        let image_name = stage_kernel_boot_artifacts(
+            &source,
+            &stage,
+            release,
+            std::env::consts::ARCH,
+        )
+        .unwrap();
+
+        assert_eq!(image_name, format!("vmlinuz-{release}"));
+        assert_eq!(fs::read(stage.join(&image_name)).unwrap(), b"test kernel image");
+        assert_eq!(
+            fs::read(stage.join(format!("config-{release}"))).unwrap(),
+            b"CONFIG_TEST=y\n"
+        );
+        assert_eq!(
+            fs::read(stage.join(format!("System.map-{release}"))).unwrap(),
+            b"test system map\n"
+        );
+        let stage_root = root.join("stage-root");
+        fs::create_dir_all(stage_root.join("boot")).unwrap();
+        fs::copy(stage.join(&image_name), stage_root.join("boot").join(&image_name)).unwrap();
+        let (_, _, modules_staged) = verify_staged_kernel(&stage_root, release).unwrap();
+        assert!(!modules_staged);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
