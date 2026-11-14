@@ -54,7 +54,7 @@ fn normalized_fingerprint(value: &str) -> String {
         .collect()
 }
 
-fn signer_from_status(status: &str) -> Result<SignatureVerification> {
+fn signer_from_status_with_signers(status: &str, trusted_signers: &[TrustedSigner]) -> Result<SignatureVerification> {
     const FATAL_STATUS: &[&str] = &[
         "BADSIG",
         "EXPSIG",
@@ -102,7 +102,7 @@ fn signer_from_status(status: &str) -> Result<SignatureVerification> {
             None => signing_fingerprint,
         };
 
-        if let Some(signer) = TRUSTED_SIGNERS
+        if let Some(signer) = trusted_signers
             .iter()
             .find(|signer| signer.fingerprint == primary_fingerprint)
         {
@@ -142,7 +142,16 @@ fn signer_from_status(status: &str) -> Result<SignatureVerification> {
     Ok(verified.remove(0))
 }
 
-pub fn verify_kernel_archive(
+fn signer_from_status(status: &str) -> Result<SignatureVerification> {
+    signer_from_status_with_signers(status, TRUSTED_SIGNERS)
+}
+
+fn verify_kernel_archive_with_signers(
+    archive: &Path,
+    signature: &Path,
+    gpg_home: Option<&Path>,
+    trusted_signers: &[TrustedSigner],
+) -> Result<SignatureVerification> {
     archive: &Path,
     signature: &Path,
     gpg_home: Option<&Path>,
@@ -206,7 +215,15 @@ pub fn verify_kernel_archive(
     pipe_result.context("streaming the decompressed tarball into GnuPG")?;
 
     let status = String::from_utf8_lossy(&gpg_output.stdout);
-    signer_from_status(&status).context("kernel source was not signed by a pinned, valid kernel.org release key")
+    signer_from_status_with_signers(&status, trusted_signers).context("kernel source was not signed by an allowed, valid release key")
+}
+
+pub fn verify_kernel_archive(
+    archive: &Path,
+    signature: &Path,
+    gpg_home: Option<&Path>,
+) -> Result<SignatureVerification> {
+    verify_kernel_archive_with_signers(archive, signature, gpg_home, TRUSTED_SIGNERS)
 }
 
 pub fn trusted_key_available(gpg_home: Option<&Path>) -> Result<Option<String>> {
@@ -401,6 +418,120 @@ mod tests {
 
         let revoked = "[GNUPG:] REVKEYSIG 6092693E Greg Kroah-Hartman\n[GNUPG:] VALIDSIG 647F28654894E3BD457199BE38DBBDC86092693E 2026-11-14 1794620000 0 4 0 1 10 00\n";
         assert!(signer_from_status(revoked).is_err());
+    }
+
+
+    #[cfg(unix)]
+    #[test]
+    fn verifies_decompressed_stream_and_rejects_tampered_archive() {
+        use std::{fs::File, os::unix::fs::PermissionsExt};
+
+        if Command::new("gpg").arg("--version").output().is_err()
+            || Command::new("xz").arg("--version").output().is_err()
+        {
+            return;
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-gpg-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("gnupg");
+        fs::create_dir_all(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let generate = Command::new("gpg")
+            .args(["--no-options", "--homedir"])
+            .arg(&home)
+            .args([
+                "--batch",
+                "--passphrase",
+                "",
+                "--quick-generate-key",
+                "Kernel Optimizer Test Signer <kernel-optimizer-test@example.invalid>",
+                "ed25519",
+                "sign",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            generate.status.success(),
+            "test key generation failed: {}",
+            String::from_utf8_lossy(&generate.stderr)
+        );
+
+        let listing = Command::new("gpg")
+            .args(["--no-options", "--homedir"])
+            .arg(&home)
+            .args(["--batch", "--with-colons", "--fingerprint", "--list-keys"])
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        let fingerprint = String::from_utf8_lossy(&listing.stdout)
+            .lines()
+            .find_map(|line| {
+                let fields = line.split(':').collect::<Vec<_>>();
+                (fields.first() == Some(&"fpr"))
+                    .then(|| fields.get(9).copied())
+                    .flatten()
+            })
+            .unwrap()
+            .to_owned();
+
+        let trusted = [TrustedSigner {
+            name: "Kernel Optimizer test signer",
+            fingerprint: Box::leak(fingerprint.clone().into_boxed_str()),
+        }];
+        let raw = root.join("source.tar");
+        let archive = root.join("source.tar.xz");
+        let signature = root.join("source.tar.sign");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&raw, b"test signed uncompressed tar stream").unwrap();
+
+        let compress = |input: &Path, output: &Path| {
+            let file = File::create(output).unwrap();
+            let status = Command::new("xz")
+                .arg("--compress")
+                .arg("--stdout")
+                .arg(input)
+                .stdout(Stdio::from(file))
+                .status()
+                .unwrap();
+            assert!(status.success(), "xz compression failed");
+        };
+        compress(&raw, &archive);
+
+        let sign = Command::new("gpg")
+            .args(["--no-options", "--homedir"])
+            .arg(&home)
+            .args(["--batch", "--yes", "--local-user", &fingerprint, "--detach-sign", "--output"])
+            .arg(&signature)
+            .arg(&raw)
+            .output()
+            .unwrap();
+        assert!(
+            sign.status.success(),
+            "test signing failed: {}",
+            String::from_utf8_lossy(&sign.stderr)
+        );
+
+        let valid = verify_kernel_archive_with_signers(&archive, &signature, Some(&home), &trusted)
+            .unwrap();
+        assert_eq!(valid.signer_primary_fingerprint, fingerprint);
+
+        fs::write(&raw, b"tampered signed uncompressed tar stream").unwrap();
+        compress(&raw, &archive);
+        assert!(
+            verify_kernel_archive_with_signers(&archive, &signature, Some(&home), &trusted).is_err(),
+            "altered archive unexpectedly passed detached-signature verification"
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
