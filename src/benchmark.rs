@@ -11,6 +11,7 @@ use std::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkResult {
     pub name: String,
+    pub workload: String,
     pub unit: String,
     pub higher_is_better: bool,
     pub iterations: usize,
@@ -27,8 +28,10 @@ pub struct BenchmarkReport {
     pub kernel: String,
     pub architecture: String,
     pub cpu: String,
+    pub cpu_microarchitecture: String,
     pub logical_cpus: usize,
     pub memory_kib: u64,
+    pub cpu_governors: Vec<String>,
     pub profile: String,
     pub results: Vec<BenchmarkResult>,
 }
@@ -48,6 +51,7 @@ fn median(values: &mut [f64]) -> f64 {
 
 fn summarize(
     name: &str,
+    workload: &str,
     unit: &str,
     higher_is_better: bool,
     samples: Vec<f64>,
@@ -58,6 +62,7 @@ fn summarize(
     let max = samples.iter().copied().fold(0.0, f64::max);
     BenchmarkResult {
         name: name.into(),
+        workload: workload.into(),
         unit: unit.into(),
         higher_is_better,
         iterations: samples.len(),
@@ -152,14 +157,14 @@ pub fn run(
         .collect::<Result<Vec<_>>>()?;
 
     let mut results = vec![
-        summarize("integer-throughput", "iterations/s", true, cpu_samples),
-        summarize("memory-copy-bandwidth", "MiB/s", true, memory_samples),
+        summarize("integer-throughput", &format!("{cpu_rounds} rounds"), "iterations/s", true, cpu_samples),
+        summarize("memory-copy-bandwidth", &format!("{memory_mib} MiB"), "MiB/s", true, memory_samples),
     ];
     if let Some(server) = iperf_server {
         let samples = (0..iterations)
             .map(|_| run_iperf(server))
             .collect::<Result<Vec<_>>>()?;
-        results.push(summarize("network-throughput", "Mbit/s", true, samples));
+        results.push(summarize("network-throughput", "iperf3 5s / 1 stream", "Mbit/s", true, samples));
     }
 
     let hardware = crate::hardware::detect();
@@ -172,8 +177,12 @@ pub fn run(
         kernel: hardware.kernel_release,
         architecture: hardware.architecture,
         cpu: hardware.cpu.model,
+        cpu_microarchitecture: hardware.cpu.microarchitecture,
         logical_cpus: hardware.cpu.logical_cpus,
         memory_kib: hardware.memory_kib,
+        cpu_governors: hardware.cpu_frequency_policies.iter()
+            .map(|policy| format!("{}:{}", policy.name, policy.governor))
+            .collect(),
         profile: profile.into(),
         results,
     };
@@ -208,8 +217,11 @@ pub fn compare(baseline_path: &Path, candidate_path: &Path) -> Result<String> {
         baseline.kernel, candidate.kernel, candidate.cpu
     );
     if baseline.cpu != candidate.cpu
+        || baseline.cpu_microarchitecture != candidate.cpu_microarchitecture
         || baseline.architecture != candidate.architecture
         || baseline.logical_cpus != candidate.logical_cpus
+        || baseline.memory_kib != candidate.memory_kib
+        || baseline.cpu_governors != candidate.cpu_governors
     {
         output.push_str(
             "WARNING: hardware metadata differs; these results are not a controlled comparison.\n\n",
@@ -224,7 +236,10 @@ pub fn compare(baseline_path: &Path, candidate_path: &Path) -> Result<String> {
         let Some(new) = candidate.results.iter().find(|item| item.name == old.name) else {
             continue;
         };
-        if old.unit != new.unit || old.higher_is_better != new.higher_is_better {
+        if old.unit != new.unit
+            || old.workload != new.workload
+            || old.higher_is_better != new.higher_is_better
+        {
             output.push_str(&format!("{:<28} incompatible report metadata\n", old.name));
             continue;
         }
@@ -268,8 +283,9 @@ mod tests {
 
     #[test]
     fn summary_tracks_direction_and_statistics() {
-        let result = summarize("test", "unit/s", true, vec![1.0, 2.0, 3.0]);
+        let result = summarize("test", "5 rounds", "unit/s", true, vec![1.0, 2.0, 3.0]);
         assert_eq!(result.median, 2.0);
+        assert_eq!(result.workload, "5 rounds");
         assert_eq!(result.min, 1.0);
         assert_eq!(result.max, 3.0);
         assert!(result.higher_is_better);
