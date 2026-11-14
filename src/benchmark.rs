@@ -17,7 +17,7 @@ fn median(values: &mut [f64]) -> f64 {
     values.sort_by(|a,b|a.total_cmp(b));
     if values.is_empty() { return 0.0; }
     let mid=values.len()/2;
-    if values.len()%2==0 {(values[mid-1]+values[mid])/2.0} else {values[mid]}
+    if values.len().is_multiple_of(2) {(values[mid-1]+values[mid])/2.0} else {values[mid]}
 }
 fn run_one(name:&str, command:&[String], iterations:usize)->Result<BenchmarkResult> {
     if command.is_empty() { bail!("benchmark command cannot be empty"); }
@@ -38,17 +38,18 @@ fn run_one(name:&str, command:&[String], iterations:usize)->Result<BenchmarkResu
 }
 pub fn run(report_path:&Path, iterations:usize, profile:&str)->Result<BenchmarkReport> {
     if !(1..=20).contains(&iterations) { bail!("iterations must be between 1 and 20"); }
-    let mut results=Vec::new();
-    // These are lightweight, repeatable baseline probes rather than synthetic claims of system performance.
-    results.push(run_one("procfs-metadata", &["sh".into(),"-c".into(),"cat /proc/cpuinfo /proc/meminfo >/dev/null".into()], iterations)?);
-    results.push(run_one("filesystem-metadata", &["sh".into(),"-c".into(),"find /sys/block -maxdepth 2 -type f -name scheduler -print >/dev/null".into()], iterations)?);
+    // These are lightweight inventory probes, not claims of kernel performance.
+    let results = vec![
+        run_one("procfs-metadata", &["sh".into(),"-c".into(),"cat /proc/cpuinfo /proc/meminfo >/dev/null".into()], iterations)?,
+        run_one("filesystem-metadata", &["sh".into(),"-c".into(),"find /sys/block -maxdepth 2 -type f -name scheduler -print >/dev/null".into()], iterations)?,
+    ];
     let report=BenchmarkReport {
         created_unix:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
         kernel:Command::new("uname").arg("-r").output().map(|o|String::from_utf8_lossy(&o.stdout).trim().into()).unwrap_or_default(),
         cpu:Command::new("sh").args(["-c","awk -F: '/model name/ {gsub(/^ +/, \"\", $2); print $2; exit}' /proc/cpuinfo"]).output().map(|o|String::from_utf8_lossy(&o.stdout).trim().into()).unwrap_or_default(),
         profile:profile.into(),results,
     };
-    if let Some(parent)=report_path.parent() { if !parent.as_os_str().is_empty(){fs::create_dir_all(parent)?;} }
+    if let Some(parent)=report_path.parent() && !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; }
     let tmp=PathBuf::from(format!("{}.tmp",report_path.display()));
     fs::write(&tmp,serde_json::to_vec_pretty(&report)?)?;
     fs::rename(tmp,report_path)?;
