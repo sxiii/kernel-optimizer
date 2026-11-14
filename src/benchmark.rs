@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
-use std::{fs, path::{Path, PathBuf}, process::{Command, Stdio}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+use std::{fs, path::{Path, PathBuf}, process::{Command, Stdio}, time::{Instant, SystemTime, UNIX_EPOCH}};
 
 #[derive(Debug, Serialize)]
 pub struct BenchmarkResult {
