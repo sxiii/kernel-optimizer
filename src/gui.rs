@@ -1020,10 +1020,10 @@ impl KernelOptimizerApp {
                     ui.add_enabled_ui(false, |ui| { ui.label("Linux TKG - source adapter pending"); });
                     ui.add_enabled_ui(false, |ui| { ui.label("PREEMPT_RT - source adapter pending"); });
                 });
-            if selected_source != configured_source {
-                if let Err(error) = self.set_profile_source(&selected_source) {
-                    self.log(format!("Could not change kernel source: {error:#}"));
-                }
+            if selected_source != configured_source
+                && let Err(error) = self.set_profile_source(&selected_source)
+            {
+                self.log(format!("Could not change kernel source: {error:#}"));
             }
         });
         if configured_source == "linux-lts" {
