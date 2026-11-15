@@ -923,7 +923,7 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
             "xz -t <source archive>; extract the signed kernel.org source archive".into()
         },
     ];
-    for patch in &manifest.source.patches {
+    for patch in &source_manifest.patches {
         recorded_commands.push(format!(
             "download and apply source patch {} (sha256 {}; signature verified: {}; Git blob: {})",
             patch.name, patch.sha256, patch.signature_verified, patch.git_blob_sha1
