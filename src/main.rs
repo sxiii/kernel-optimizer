@@ -583,6 +583,7 @@ struct SourceProvenance {
     signature_hash_algorithm: String,
     signer_name: String,
     signer_primary_fingerprint: String,
+    patches: Vec<source_adapters::PatchProvenance>,
     gpg_version: Option<String>,
     xz_version: Option<String>,
     curl_version: Option<String>,
@@ -849,26 +850,36 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     let host=hardware::detect();
     let mut recorded_profile=p.clone();
     recorded_profile.gpg_home=None;
+    let verified_source = base_signature_verification.is_some()
+        && patch_provenance.iter().all(|patch| patch.signature_verified);
+    let base_verification = base_signature_verification.as_ref();
     let source_manifest=SourceProvenance {
-        project:format!("Linux kernel.org {} track", if p.source == "linux-lts" { "longterm" } else { "stable" }),
+        project: source_plan.as_ref().map(|plan| plan.project.clone())
+            .unwrap_or_else(|| format!("Linux kernel.org {} track", if p.source == "linux-lts" { "longterm" } else { "stable" })),
         version:p.version.clone(),
         archive_url:url,
         archive_sha256,
-        signature_url,
+        signature_url:signature_url_text,
         signature_sha256,
-        signature_verified:true,
-        signature_verification_method:"xz --decompress --stdout piped to gpg --no-options --batch --no-auto-key-import --no-auto-key-retrieve --status-fd=1 --verify".into(),
-        trust_reference:"https://www.kernel.org/signature.html".into(),
-        signature_creation_date:signature_verification.signature_creation_date,
-        signature_timestamp:signature_verification.signature_timestamp,
-        signature_public_key_algorithm:signature_verification.public_key_algorithm,
-        signature_hash_algorithm:signature_verification.hash_algorithm,
-        signer_name:signature_verification.signer_name,
-        signer_primary_fingerprint:signature_verification.signer_primary_fingerprint,
-        gpg_version,
-        xz_version,
-        curl_version,
-        tar_version,
+        signature_verified:verified_source,
+        signature_verification_method: if verified_source {
+            "kernel.org base archive signature plus all source patch signatures verified against pinned signer fingerprints".into()
+        } else {
+            "NOT FULLY VERIFIED: explicit opt-in source or unsigned patch provenance; do not use for package installation".into()
+        },
+        trust_reference:source_plan.as_ref().map(|plan| plan.trust_reference.clone())
+            .unwrap_or_else(|| "https://www.kernel.org/signature.html".into()),
+        signature_creation_date:base_verification.map(|v| v.signature_creation_date.clone()).unwrap_or_default(),
+        signature_timestamp:base_verification.map(|v| v.signature_timestamp.clone()).unwrap_or_default(),
+        signature_public_key_algorithm:base_verification.map(|v| v.public_key_algorithm.clone()).unwrap_or_default(),
+        signature_hash_algorithm:base_verification.map(|v| v.hash_algorithm.clone()).unwrap_or_default(),
+        signer_name:base_verification.map(|v| v.signer_name.clone()).unwrap_or_else(|| "not independently verified".into()),
+        signer_primary_fingerprint:base_verification.map(|v| v.signer_primary_fingerprint.clone()).unwrap_or_default(),
+        patches:patch_provenance,
+        gpg_version:provenance::command_version("gpg",&["--version"]),
+        xz_version:provenance::command_version("xz",&["--version"]),
+        curl_version:provenance::command_version("curl",&["--version"]),
+        tar_version:provenance::command_version("tar",&["--version"]),
     };
     let compiler_command=if p.ccache { format!("ccache {}",p.compiler) } else { p.compiler.clone() };
     let mut recorded_commands=vec![
