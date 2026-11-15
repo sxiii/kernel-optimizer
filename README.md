@@ -28,7 +28,7 @@ The running kernel and bootloader are not modified by the build command.
 - [ ] Add initramfs, module-signing and Secure Boot preflight/integration.
 - [ ] Add boot-entry creation only with a known-good fallback and tested rollback.
 - [ ] Test builds and tuning behavior across multiple distributions and kernel configurations.
-- [ ] Add additional kernel source adapters (linux-zen, CachyOS, TKG and PREEMPT_RT) after their patch/config provenance is defined.
+- [ ] Add additional kernel source adapters after validating upstream patch compatibility and signer rotation.
 
 The install subcommand is intentionally disabled. Package installation and bootloader
 mutation remain separate future milestones; a staged image is not an installable or
@@ -39,7 +39,7 @@ bootable system by itself.
 Rust stable, a C toolchain, make, curl, xz, tar, GnuPG 2.4 or later, bc, bison, flex, OpenSSL development headers, elfutils, pahole, perl, python and the usual kernel build dependencies. On Arch/Garuda, start with:
 
 ```sh
-sudo pacman -S --needed base-devel rust curl xz gnupg bc bison flex openssl elfutils pahole perl python ccache
+sudo pacman -S --needed base-devel rust curl xz zstd gzip patch tar gnupg bc bison flex openssl elfutils pahole perl python ccache
 ```
 
 Optional tools such as `lspci`, `lsblk`, `zcat` and `menuconfig` enhance inspection/configuration.
@@ -69,6 +69,45 @@ because it was imported. The application compares the full primary fingerprint
 against the allowlist. Verification disables GnuPG option files, embedded-key import,
 automatic key retrieval and automatic key location; it fails on bad, expired or
 revoked signature status.
+
+### Additional kernel source adapters
+
+The build profile accepts these additional source values:
+
+| Profile value | Source behavior | Trust / packaging |
+|---|---|---|
+| \`linux-zen\` | Downloads the kernel.org stable archive, then applies the current Zen release patch matching that exact base version. | Verifies the kernel.org tarball and the detached signature on the Zen patch. Eligible for verified packaging when the build artifacts pass the normal checks. |
+| \`linux-rt\` | Downloads the exact upstream X.Y base release and applies the latest PREEMPT_RT patch advertised for that kernel.org series. | Verifies the kernel.org tarball and the RT patch signature. RT builds are pinned to X.Y, not a later X.Y.Z stable point release. |
+| \`linux-cachyos\` | Downloads the full source archive from the latest CachyOS Linux GitHub release. | Requires \`allow_unverified_sources = true\`; checks the SHA-256 digest published in GitHub release metadata, but does not claim a trusted detached signature. Not eligible for verified Arch packaging. |
+| \`linux-tkg\` | Starts with a signed kernel.org stable archive and applies only the pinned TKG \`glitched-base\` and EEVDF additions patches for the matching release tag. No TKG shell installer or PKGBUILD is executed. | Requires \`allow_unverified_sources = true\`; the patchset is pinned to a Git commit but is not independently signed. Not eligible for verified Arch packaging. |
+
+CachyOS and TKG are deliberately opt-in because their current source artifacts do
+not meet the project's detached-signature trust policy. Add this to a profile only
+after reviewing and accepting that limitation:
+
+\`\`\`toml
+source = "linux-cachyos" # or "linux-tkg"
+version = "stable"
+allow_unverified_sources = true
+\`\`\`
+
+The GUI exposes the same checkbox when either opt-in source is selected. The
+provenance manifest records each patch URL, hash, signature status, signer and
+pinned TKG source revision. An unverified source remains non-packageable: the
+Arch package adapter continues to reject it rather than silently converting a
+GitHub digest or an unsigned patch into a trusted signature.
+
+The Zen and PREEMPT_RT patch signers have separate pinned primary fingerprints:
+
+| Patch source | Signer | Pinned primary fingerprint |
+|---|---|---|
+| Linux Zen | Jan Alexander Steffens (heftig) | \`83BC8889351B5DEBBB68416EB8AC08600F108CDF\` |
+| PREEMPT_RT | Sebastian Andrzej Siewior | \`64254695FFF0AA4466CC19E67B96E8162A8CF5D1\` |
+
+Import the keys into the same GnuPG home used by the build, then compare the
+complete primary fingerprints shown by \`gpg --fingerprint\` with the values
+above before building. The verifier disables automatic key retrieval and accepts
+only those exact pinned identities for their respective patch signatures.
 
 ### Prepare the GnuPG keyring once
 
