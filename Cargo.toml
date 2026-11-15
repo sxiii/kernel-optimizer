@@ -21,3 +21,7 @@ libc = "0.2"
 ratatui = "0.30.2"
 crossterm = "0.29"
 sha2 = "0.10"
+
+# Native desktop interface (OpenGL renderer) and native file pickers.
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+rfd = "0.18.0"

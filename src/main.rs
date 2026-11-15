@@ -7,6 +7,7 @@ mod benchmark;
 mod recommendations;
 mod tui;
 mod provenance;
+mod gui;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::{Path, PathBuf}, process::Command, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
@@ -25,6 +26,8 @@ enum Commands {
     Hardware,
     /// Generate hardware-aware recommendations without applying changes.
     Recommend { #[arg(long, value_enum, default_value="desktop")] profile: Workload },
+    /// Open the native desktop interface.
+    Gui,
     /// Open the interactive, read-only terminal dashboard.
     Tui { #[arg(long, value_enum, default_value="desktop")] profile: Workload },
     /// Run CPU and memory benchmarks; optionally test an iperf3 server.
@@ -1148,6 +1151,7 @@ fn main()->Result<()> {
             let report=recommendations::generate(profile);
             println!("{}",serde_json::to_string_pretty(&report)?);
         },
+        Commands::Gui=>gui::run()?,
         Commands::Tui{profile}=>{
             tui::run(profile)?;
         },
