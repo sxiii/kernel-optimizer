@@ -7,6 +7,7 @@ mod benchmark;
 mod recommendations;
 mod tui;
 mod provenance;
+mod source_adapters;
 mod arch_package;
 mod gui;
 use regex::Regex;
@@ -107,6 +108,7 @@ struct Profile {
     config_base: String, compiler: String, optimization: String,
     use_mold: bool, ccache: bool, build_dir: PathBuf, stage_dir: PathBuf,
     enable_lto: bool, enable_bpf: bool, menuconfig: bool,
+    allow_unverified_sources: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     gpg_home: Option<PathBuf>,
 }
@@ -117,7 +119,7 @@ impl Default for Profile {
         config_base:"current".into(), compiler:"gcc".into(), optimization:"native".into(),
         use_mold:false, ccache:true, build_dir:PathBuf::from("/var/tmp/kernel-optimizer/build"),
         stage_dir:PathBuf::from("/var/tmp/kernel-optimizer/stage"),
-        enable_lto:false, enable_bpf:true, menuconfig:false, gpg_home:None,
+        enable_lto:false, enable_bpf:true, menuconfig:false, allow_unverified_sources:false, gpg_home:None,
     }}
 }
 
@@ -135,11 +137,11 @@ fn sources() {
     println!("SOURCE            STATUS       TRACK / PURPOSE");
     println!("linux             SUPPORTED    Latest stable upstream kernel (kernel.org; signed tarball)");
     println!("linux-lts          SUPPORTED    Latest longterm upstream kernel (kernel.org; signed tarball)");
-    println!("linux-zen          PLANNED      Zen patchset (requires pinned signed source adapter)");
-    println!("linux-cachyos      PLANNED      CachyOS patch/config track (requires audited patch manifest)");
-    println!("linux-tkg          PLANNED      TKG framework (scripts are not executed by this builder)");
-    println!("linux-rt           PLANNED      PREEMPT_RT patchset (requires separate signer validation)");
-    println!("\nOnly SUPPORTED tracks can be built. Planned tracks remain visible but fail closed until their source and patch provenance can be verified.");
+    println!("linux-zen          SUPPORTED    Kernel.org base + signed Zen patch");
+    println!("linux-rt           SUPPORTED    Kernel.org base + signed PREEMPT_RT patch");
+    println!("linux-cachyos      OPT-IN       CachyOS release archive; explicit unverified-source opt-in required");
+    println!("linux-tkg          OPT-IN       Pinned TKG EEVDF patch subset; explicit unverified-source opt-in required");
+    println!("\nCachyOS and TKG require allow_unverified_sources = true and are excluded from verified package builds.");
 }
 fn profile(file:&Path,create:bool)->Result<()> {
     if create { let p=toml::to_string_pretty(&Profile::default())?; fs::write(file,p).with_context(||format!("writing {}",file.display()))?; println!("Created {}",file.display()); }
@@ -164,7 +166,8 @@ fn release_moniker(source: &str)->Result<&'static str> {
     match source {
         "linux" => Ok("stable"),
         "linux-lts" => Ok("longterm"),
-        other => bail!("source '{other}' does not yet have a verified source adapter; currently buildable sources are linux and linux-lts"),
+        "linux-zen" | "linux-cachyos" | "linux-tkg" | "linux-rt" => Ok("stable"),
+        other => bail!("unknown kernel source '{other}'"),
     }
 }
 fn ensure_kernel_archive(archive: &Path, url: &str) -> Result<()> {
