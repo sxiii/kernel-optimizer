@@ -7,6 +7,7 @@ mod benchmark;
 mod recommendations;
 mod tui;
 mod provenance;
+mod arch_package;
 mod gui;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -78,8 +79,25 @@ enum Commands {
     Tune { #[arg(long, value_enum, default_value="desktop")] profile: Workload, #[arg(long)] dry_run: bool },
     /// Remove optimizer-managed sysctl and udev drop-ins.
     Revert { #[arg(long)] dry_run: bool },
-    /// Reserved: installation stays disabled until package and rollback adapters are available.
-    Install { #[arg(long)] staged: Option<PathBuf>, #[arg(long)] yes: bool },
+    /// Build a reviewable Arch Linux package from verified staged kernel artifacts.
+    ArchPackage {
+        #[arg(long, default_value="kernel-optimizer.toml")]
+        profile: PathBuf,
+        /// Upstream kernel version (inferred when omitted).
+        #[arg(long)]
+        version: Option<String>,
+        /// Package output directory (defaults to <stage_dir>/packages).
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
+    /// Install a previously built kernel-optimizer Arch package via pacman.
+    Install {
+        #[arg(long)]
+        package: PathBuf,
+        /// Acknowledge the package transaction after reviewing the plan.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1180,12 +1198,19 @@ fn main()->Result<()> {
         Commands::Profile{file,create}=>profile(&file,create)?,
         Commands::Build{profile,dry_run}=>build(&profile,dry_run)?,
         Commands::Finalize{profile,version}=>finalize(&profile,version.as_deref())?,
+        Commands::ArchPackage{profile,version,output_dir}=>{
+            let p:Profile=toml::from_str(&fs::read_to_string(&profile)
+                .with_context(||format!("reading build profile {}",profile.display()))?)?;
+            validate_profile(&p)?;
+            let version=infer_finalize_version(&p,version.as_deref())?;
+            let release=format!("{version}{}",p.local_version);
+            let output_dir=output_dir.unwrap_or_else(||p.stage_dir.join("packages"));
+            let package=arch_package::build(&p.stage_dir,&release,&version,&output_dir)?;
+            println!("Arch package created at {}",package.display());
+        },
+        Commands::Install{package,yes}=>arch_package::install(&package,yes)?,
         Commands::Tune{profile,dry_run}=>tuning::tune(profile,dry_run)?,
         Commands::Revert{dry_run}=>tuning::revert(dry_run)?,
-        Commands::Install{staged,yes}=>{
-            let _=staged; let _=yes;
-            bail!("installation/bootloader integration is intentionally not enabled in 0.1. Review staged artifacts and use your distribution's supported packaging tools; automated bootloader mutation will be added after distro-specific adapters and rollback checks.");
-        }
     }
     Ok(())
 }

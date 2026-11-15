@@ -31,11 +31,11 @@ sufficient proof that a machine can boot it.
 
 ## Priority 3 — Distribution packaging (Arch/Garuda first)
 
-- [ ] Generate a reviewable Arch package build description from staged artifacts.
-- [ ] Package modules, kernel image, System.map and config without invoking pacman.
-- [ ] Detect existing kernel package names and prevent accidental file/package collisions.
+- [x] Generate a reviewable Arch package build description from staged artifacts.
+- [x] Package modules, kernel image, System.map and config without invoking pacman.
+- [x] Detect conflicting staged/installed module directories and owned boot-image/preset files before package installation.
 - [ ] Test package build in a disposable clean Arch environment.
-- [ ] Keep package installation as a separate, explicit user action.
+- [x] Keep package installation as a separate, explicit user action.
 
 ## Priority 4 — Bootability, signing and rollback
 
@@ -54,7 +54,8 @@ sufficient proof that a machine can boot it.
 - [ ] Add hardware-specific benchmark suites only when their results are reproducible
   and their limitations are clearly reported.
 - [x] Add a native desktop GUI for every currently implemented CLI workflow, with command logs, JSON benchmark import/comparison charts, and privileged actions gated by PolicyKit.
-- [ ] Keep the GUI aligned with future distro packaging and bootability adapters; installation remains disabled until those safety milestones are implemented.
+- [x] Connect the GUI Installation page to package creation and explicitly authorized pacman installation.
+- [ ] Add automated integration tests in a disposable clean Arch/Garuda environment; bootloader entry management and Secure Boot signing remain deliberately manual/unsupported.
 
 ## Explicit non-goals for the current milestone
 

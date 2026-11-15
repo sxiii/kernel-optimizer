@@ -134,17 +134,19 @@ staged-build finalization, system tuning previews/apply/revert, benchmark execut
 and benchmark JSON comparison. It includes live command output and activity logs,
 native file pickers, median comparison bars, and per-iteration sample charts.
 
-The build, benchmark, tuning and comparison pages call the existing CLI implementation;
-the GUI does not maintain a second copy of the kernel-build or tuning logic. A
-`menuconfig` build and the existing terminal dashboard open in an external terminal
-because they require an interactive TTY. Applying or reverting system tuning uses
-`pkexec` / PolicyKit for a separate administrator authorization prompt. Run the GUI
-as your ordinary user, not with `sudo`.
+The build, benchmark, tuning, package creation and comparison pages call the
+existing CLI implementation; the GUI does not maintain a second copy of kernel-build
+or tuning logic. A `menuconfig` build and the terminal dashboard open in an external
+terminal because they require an interactive TTY. Applying/reverting system tuning
+and installing a finished kernel package use `pkexec` / PolicyKit authorization.
+Run the GUI as your ordinary user, not with `sudo`.
 
-The Install page is intentionally marked unavailable. The CLI install command is
-still disabled until distribution-specific packaging, initramfs, module-signing,
-boot-entry and rollback adapters are implemented. The GUI does not bypass that
-safety boundary.
+The Installation page builds an Arch pacman package from finalized staging artifacts
+and can install it as a separate authorized operation. It detects the active
+mkinitcpio or dracut pacman hook (including Garuda's dracut integration). Bootloader
+entry creation and Secure Boot/module signing remain deliberately unsupported;
+keep the current known-good boot entry and add the new entry manually after package
+installation.
 
 On Arch/Garuda, install the GUI build dependencies if they are not already present:
 
@@ -203,6 +205,60 @@ Builds can take considerable time and disk space. Use a dedicated filesystem wit
 5. Verify artifacts and create a distro package before touching the boot path.
 6. Keep the currently bootable kernel as a known-good fallback.
 
+
+## Arch Linux package workflow (x86_64)
+
+The desktop GUI's **Installation** page and the CLI can build a pacman package from an
+already finalized, verified staging tree. This adapter currently targets Arch Linux
+and Arch-derived x86_64 systems.
+
+```sh
+# Build from existing staged artifacts. This does not compile the kernel.
+kernel-optimizer arch-package --profile kernel-optimizer.toml
+
+# Or choose the version and package destination explicitly.
+kernel-optimizer arch-package --profile kernel-optimizer.toml \
+  --version 7.3.4 --output-dir /var/tmp/kernel-optimizer/packages
+
+# Install the generated package as a separate, explicit administrator action.
+sudo kernel-optimizer install \
+  --package /var/tmp/kernel-optimizer/packages/linux-optimizer-7.3.4-ko-7.3.4-1-x86_64.pkg.tar.zst \
+  --yes
+```
+
+Package creation runs as the ordinary build user with `makepkg`. It rechecks the
+provenance schema, staged kernel image SHA-256, staged config hash, staged modules
+tree hash, module indexes and optional System.map before packaging. It copies the
+verified kernel image, module tree, config, provenance and package metadata into a
+normal pacman package. The package name and boot/initramfs filenames are unique per kernel release, so multiple custom kernels can be installed side by side for rollback. Build workspaces are retained on failure for inspection.
+The output directory needs enough free space for another copy of the staged modules
+tree and the compressed package.
+
+The package builder detects the host's active initramfs integration:
+- **mkinitcpio**: requires its executable and active pacman install hook, and adds a
+  dedicated default/fallback preset.
+- **dracut**: requires its executable and active pacman hook. This includes Garuda's
+  `garuda-dracut-support` hook; its package trigger is satisfied by the kernel's
+  `/usr/lib/modules/<release>/vmlinuz` and `pkgbase` files.
+
+The builder fails closed when neither supported hook is available, when both are
+active, or when an active hook is masked/incomplete. It also rejects forced module
+signature enforcement because module signing is not implemented in this adapter.
+
+Installation is separate from package creation. The GUI requests administrator
+authorization through PolicyKit; the CLI requires root and `--yes`. The installer
+checks package identity, architecture, initramfs backend, Secure Boot state, /boot
+mount state, existing module directories and boot-image/preset file conflicts before
+calling `pacman -U`. Secure Boot enabled or indeterminate on UEFI is a hard stop.
+
+**Bootloader entries are not created or edited.** The package installs
+`/boot/vmlinuz-linux-optimizer-<release>` and allows the active initramfs pacman hook to
+generate initramfs images. After installation, inspect the files in /boot and add
+a bootloader entry using your distribution's supported tools. Keep the current,
+known-good kernel entry until the new kernel has booted successfully. systemd-boot
+setups whose ESP is mounted at /efi are not supported by this /boot-based adapter.
+No Secure Boot keys, firmware settings, GRUB configuration or EFI entries are
+changed automatically.
 
 ## System tuning (sysctl and I/O scheduler)
 
