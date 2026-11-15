@@ -7,6 +7,7 @@ mod benchmark;
 mod recommendations;
 mod tui;
 mod provenance;
+mod install;
 mod gui;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -78,8 +79,25 @@ enum Commands {
     Tune { #[arg(long, value_enum, default_value="desktop")] profile: Workload, #[arg(long)] dry_run: bool },
     /// Remove optimizer-managed sysctl and udev drop-ins.
     Revert { #[arg(long)] dry_run: bool },
-    /// Reserved: installation stays disabled until package and rollback adapters are available.
-    Install { #[arg(long)] staged: Option<PathBuf>, #[arg(long)] yes: bool },
+    /// Inspect a verified staged build and local Arch-family installation prerequisites.
+    InstallCheck {
+        #[arg(long, default_value="/var/tmp/kernel-optimizer/stage")]
+        staged: PathBuf,
+    },
+    /// Build an Arch-family package from a verified staged kernel without installing it.
+    Package {
+        #[arg(long, default_value="/var/tmp/kernel-optimizer/stage")]
+        staged: PathBuf,
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
+    /// Install a locally built kernel-optimizer package. Requires root and --yes.
+    Install {
+        #[arg(long)]
+        package: PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1182,9 +1200,15 @@ fn main()->Result<()> {
         Commands::Finalize{profile,version}=>finalize(&profile,version.as_deref())?,
         Commands::Tune{profile,dry_run}=>tuning::tune(profile,dry_run)?,
         Commands::Revert{dry_run}=>tuning::revert(dry_run)?,
-        Commands::Install{staged,yes}=>{
-            let _=staged; let _=yes;
-            bail!("installation/bootloader integration is intentionally not enabled in 0.1. Review staged artifacts and use your distribution's supported packaging tools; automated bootloader mutation will be added after distro-specific adapters and rollback checks.");
+        Commands::InstallCheck{staged}=>{
+            println!("{}", serde_json::to_string_pretty(&install::inspect_stage(&staged)?)?);
+        },
+        Commands::Package{staged,output_dir}=>{
+            let artifact=install::build_arch_package(&staged,output_dir.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&artifact)?);
+        },
+        Commands::Install{package,yes}=>{
+            install::install_arch_package(&package,yes)?;
         }
     }
     Ok(())

@@ -13,6 +13,13 @@ use std::{
     time::Duration,
 };
 
+fn profile_stage_dir(contents: &str) -> String {
+    toml::from_str::<toml::Value>(contents)
+        .ok()
+        .and_then(|value| value.get("stage_dir").and_then(toml::Value::as_str).map(str::to_owned))
+        .unwrap_or_else(|| "/var/tmp/kernel-optimizer/stage".into())
+}
+
 const DEFAULT_PROFILE: &str = r#"source = "linux"
 version = "stable"
 local_version = "-ko"
@@ -63,22 +70,6 @@ impl Page {
         }
     }
 
-    fn icon(self) -> &'static str {
-        match self {
-            Self::Overview => "◈",
-            Self::Hardware => "▦",
-            Self::Recommendations => "✦",
-            Self::Sources => "⌘",
-            Self::Profile => "⚙",
-            Self::Build => "⇧",
-            Self::Finalize => "✓",
-            Self::Benchmarks => "▥",
-            Self::Compare => "⌁",
-            Self::Tuning => "☷",
-            Self::Install => "⇩",
-            Self::Activity => "≋",
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -88,6 +79,8 @@ enum OutputTarget {
     Recommendations,
     Sources,
     Comparison,
+    InstallCheck,
+    Package,
 }
 
 #[derive(Clone, Copy)]
@@ -108,10 +101,11 @@ struct MetricComparison {
     change_percent: Option<f64>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 enum PrivilegedAction {
     Apply,
     Revert,
+    InstallPackage(PathBuf),
 }
 
 struct KernelOptimizerApp {
@@ -120,6 +114,9 @@ struct KernelOptimizerApp {
     profile_path: String,
     profile_text: String,
     profile_dirty: bool,
+    stage_directory: String,
+    install_info: Option<serde_json::Value>,
+    install_package_path: String,
     selected_workload: String,
     selected_recommendation: String,
     finalize_version: String,
@@ -175,6 +172,7 @@ impl KernelOptimizerApp {
         let profile_text = fs::read_to_string(&profile_path)
             .or_else(|_| fs::read_to_string("kernel-optimizer.example.toml"))
             .unwrap_or_else(|_| DEFAULT_PROFILE.to_owned());
+        let stage_directory = profile_stage_dir(&profile_text);
         let current_kernel = Command::new("uname")
             .arg("-r")
             .output()
@@ -189,6 +187,9 @@ impl KernelOptimizerApp {
             profile_path: profile_path.display().to_string(),
             profile_text,
             profile_dirty: false,
+            stage_directory,
+            install_info: None,
+            install_package_path: String::new(),
             selected_workload: "desktop".into(),
             selected_recommendation: "desktop".into(),
             finalize_version: String::new(),
@@ -252,9 +253,9 @@ impl KernelOptimizerApp {
         self.output_target = target;
         self.last_exit_code = None;
         self.status = if elevated {
-            "Waiting for administrator authorization…".into()
+            "Waiting for administrator authorization...".into()
         } else {
-            "Running…".into()
+            "Running...".into()
         };
         self.log(format!("$ {}", self.current_command));
         self.running = true;
@@ -353,6 +354,21 @@ impl KernelOptimizerApp {
                     }
                     OutputTarget::Sources => self.sources_text = self.output_capture.clone(),
                     OutputTarget::Comparison => self.comparison_output = self.output_capture.clone(),
+                    OutputTarget::InstallCheck => match serde_json::from_str(&self.output_capture) {
+                        Ok(report) => self.install_info = Some(report),
+                        Err(error) => self.log(format!("Could not parse installation readiness JSON: {error}")),
+                    },
+                    OutputTarget::Package => match parse_trailing_json_value(&self.output_capture) {
+                        Ok(report) => {
+                            if let Some(path) = report.get("path").and_then(serde_json::Value::as_str) {
+                                self.install_package_path = path.to_owned();
+                                self.log(format!("Package created: {path}"));
+                            } else {
+                                self.log("Package command returned JSON without a package path.");
+                            }
+                        }
+                        Err(error) => self.log(format!("Could not parse package result JSON: {error:#}")),
+                    },
                     OutputTarget::None => {}
                 }
                 if let Some((path, slot)) = self.pending_report.take() {
@@ -371,6 +387,8 @@ impl KernelOptimizerApp {
                     && let Ok(contents) = fs::read_to_string(&self.profile_path)
                 {
                     self.profile_text = contents;
+                    self.stage_directory = profile_stage_dir(&self.profile_text);
+                    self.install_info = None;
                     self.profile_dirty = false;
                 }
             }
@@ -394,6 +412,8 @@ impl KernelOptimizerApp {
         }
         fs::write(&path, &self.profile_text)
             .with_context(|| format!("writing profile {}", path.display()))?;
+        self.stage_directory = profile_stage_dir(&self.profile_text);
+        self.install_info = None;
         self.profile_dirty = false;
         self.log(format!("Saved profile to {}", path.display()));
         Ok(())
@@ -403,6 +423,7 @@ impl KernelOptimizerApp {
         match fs::read_to_string(self.profile_path.trim()) {
             Ok(contents) => {
                 self.profile_text = contents;
+                self.stage_directory = profile_stage_dir(&self.profile_text);
                 self.profile_dirty = false;
                 self.log(format!("Loaded profile from {}", self.profile_path));
             }
@@ -542,7 +563,44 @@ impl KernelOptimizerApp {
                 true,
                 OutputTarget::None,
             ),
+            PrivilegedAction::InstallPackage(package) => self.launch(
+                vec![
+                    "install".into(),
+                    "--package".into(),
+                    package.display().to_string(),
+                    "--yes".into(),
+                ],
+                true,
+                OutputTarget::None,
+            ),
         }
+    }
+
+    fn run_install_check(&mut self) {
+        let stage = self.stage_directory.trim();
+        if stage.is_empty() {
+            self.log("Choose a staging directory first.");
+            return;
+        }
+        self.install_info = None;
+        self.launch(
+            vec!["install-check".into(), "--staged".into(), stage.to_owned()],
+            false,
+            OutputTarget::InstallCheck,
+        );
+    }
+
+    fn build_install_package(&mut self) {
+        let stage = self.stage_directory.trim();
+        if stage.is_empty() {
+            self.log("Choose a staging directory first.");
+            return;
+        }
+        self.launch(
+            vec!["package".into(), "--staged".into(), stage.to_owned()],
+            false,
+            OutputTarget::Package,
+        );
     }
 
     fn open_tui(&mut self) {
@@ -586,7 +644,7 @@ impl KernelOptimizerApp {
 
     fn nav_button(&mut self, ui: &mut egui::Ui, page: Page) {
         let selected = self.page == page;
-        let label = format!("{}  {}", page.icon(), page.title());
+        let label = page.title().to_owned();
         let button = egui::Button::new(
             RichText::new(label)
                 .size(14.0)
@@ -648,7 +706,7 @@ impl KernelOptimizerApp {
                     ui.label("Kernel version reported by uname");
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_enabled(!self.running, egui::Button::new("↻  Refresh hardware").fill(Color32::from_rgb(35, 105, 135))).clicked() {
+                    if ui.add_enabled(!self.running, egui::Button::new("Refresh hardware").fill(Color32::from_rgb(35, 105, 135))).clicked() {
                         self.run_hardware();
                     }
                 });
@@ -665,7 +723,7 @@ impl KernelOptimizerApp {
             .and_then(|value| value.get("memory_kib"))
             .and_then(serde_json::Value::as_u64)
             .map(|kib| format!("{:.1} GiB", kib as f64 / 1024.0 / 1024.0))
-            .unwrap_or_else(|| "—".into());
+            .unwrap_or_else(|| "-".into());
         let devices = self.hardware.as_ref()
             .and_then(|value| value.get("block_devices"))
             .and_then(serde_json::Value::as_array)
@@ -682,7 +740,7 @@ impl KernelOptimizerApp {
                 ui.heading("Kernel workflow");
                 ui.label("Preflight, configure, compile and verify staged kernel builds.");
                 ui.add_space(8.0);
-                if ui.button("Open build workspace  →").clicked() {
+                if ui.button("Open build workspace").clicked() {
                     self.page = Page::Build;
                 }
                 if ui.button("Run environment doctor").clicked() {
@@ -709,7 +767,7 @@ impl KernelOptimizerApp {
                 ui.label(RichText::new("Preview first").color(Color32::from_rgb(235, 191, 104)));
             });
             ui.label("Review workload-aware sysctl and I/O scheduler changes. Applying or reverting requires an administrator authorization prompt.");
-            if ui.button("Open tuning controls  →").clicked() {
+            if ui.button("Open tuning controls").clicked() {
                 self.page = Page::Tuning;
             }
         });
@@ -733,7 +791,7 @@ impl KernelOptimizerApp {
     fn hardware_page(&mut self, ui: &mut egui::Ui) {
         Self::page_header(ui, "Hardware inventory", "Live system information collected by the existing hardware detector.");
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.running, egui::Button::new("↻ Refresh hardware").fill(Color32::from_rgb(35, 105, 135))).clicked() {
+            if ui.add_enabled(!self.running, egui::Button::new(" Refresh hardware").fill(Color32::from_rgb(35, 105, 135))).clicked() {
                 self.run_hardware();
             }
             if ui.button("Open raw JSON").clicked() {
@@ -786,11 +844,11 @@ impl KernelOptimizerApp {
                     }
                     ui.end_row();
                     for item in devices {
-                        ui.label(item["name"].as_str().unwrap_or("—"));
-                        ui.label(item["media_type"].as_str().unwrap_or("—"));
-                        ui.label(item["size"].as_str().unwrap_or("—"));
-                        ui.label(item["model"].as_str().unwrap_or("—"));
-                        ui.label(item["scheduler"].as_str().unwrap_or("—"));
+                        ui.label(item["name"].as_str().unwrap_or("-"));
+                        ui.label(item["media_type"].as_str().unwrap_or("-"));
+                        ui.label(item["size"].as_str().unwrap_or("-"));
+                        ui.label(item["model"].as_str().unwrap_or("-"));
+                        ui.label(item["scheduler"].as_str().unwrap_or("-"));
                         ui.end_row();
                     }
                 });
@@ -802,7 +860,7 @@ impl KernelOptimizerApp {
                 ui.heading("Graphics controllers");
                 if let Some(gpus) = hw["gpus"].as_array() {
                     for gpu in gpus {
-                        ui.label(gpu.as_str().unwrap_or("—"));
+                        ui.label(gpu.as_str().unwrap_or("-"));
                     }
                     if gpus.is_empty() { ui.label("No controllers reported."); }
                 }
@@ -811,7 +869,7 @@ impl KernelOptimizerApp {
                 ui.heading("Network controllers");
                 if let Some(network) = hw["network_controllers"].as_array() {
                     for controller in network {
-                        ui.label(controller.as_str().unwrap_or("—"));
+                        ui.label(controller.as_str().unwrap_or("-"));
                     }
                     if network.is_empty() { ui.label("No controllers reported."); }
                 }
@@ -827,14 +885,14 @@ impl KernelOptimizerApp {
                     }
                     ui.end_row();
                     for policy in policies {
-                        ui.label(policy["name"].as_str().unwrap_or("—"));
-                        ui.label(policy["affected_cpus"].as_str().unwrap_or("—"));
-                        ui.label(policy["governor"].as_str().unwrap_or("—"));
-                        ui.label(policy["energy_performance_preference"].as_str().unwrap_or("—"));
-                        ui.label(policy["current_frequency_mhz"].as_f64().map_or_else(|| "—".into(), |v| format!("{v:.0}")));
-                        let min = policy["min_frequency_mhz"].as_f64().map_or_else(|| "—".into(), |v| format!("{v:.0}"));
-                        let max = policy["max_frequency_mhz"].as_f64().map_or_else(|| "—".into(), |v| format!("{v:.0}"));
-                        ui.label(format!("{min}–{max}"));
+                        ui.label(policy["name"].as_str().unwrap_or("-"));
+                        ui.label(policy["affected_cpus"].as_str().unwrap_or("-"));
+                        ui.label(policy["governor"].as_str().unwrap_or("-"));
+                        ui.label(policy["energy_performance_preference"].as_str().unwrap_or("-"));
+                        ui.label(policy["current_frequency_mhz"].as_f64().map_or_else(|| "-".into(), |v| format!("{v:.0}")));
+                        let min = policy["min_frequency_mhz"].as_f64().map_or_else(|| "-".into(), |v| format!("{v:.0}"));
+                        let max = policy["max_frequency_mhz"].as_f64().map_or_else(|| "-".into(), |v| format!("{v:.0}"));
+                        ui.label(format!("{min}-{max}"));
                         ui.end_row();
                     }
                 });
@@ -876,17 +934,17 @@ impl KernelOptimizerApp {
                     });
                     ui.columns(2, |columns| {
                         columns[0].label(RichText::new("CURRENT").size(10.0).color(Color32::GRAY).strong());
-                        columns[0].label(item["current"].as_str().unwrap_or("—"));
+                        columns[0].label(item["current"].as_str().unwrap_or("-"));
                         columns[1].label(RichText::new("SUGGESTION").size(10.0).color(Color32::GRAY).strong());
-                        columns[1].label(RichText::new(item["suggestion"].as_str().unwrap_or("—")).color(Color32::from_rgb(125, 208, 161)));
+                        columns[1].label(RichText::new(item["suggestion"].as_str().unwrap_or("-")).color(Color32::from_rgb(125, 208, 161)));
                     });
                     ui.add_space(4.0);
                     ui.label(RichText::new("Why").strong());
-                    ui.label(item["rationale"].as_str().unwrap_or("—"));
+                    ui.label(item["rationale"].as_str().unwrap_or("-"));
                     ui.label(RichText::new("Trade-off").strong());
-                    ui.label(item["tradeoff"].as_str().unwrap_or("—"));
+                    ui.label(item["tradeoff"].as_str().unwrap_or("-"));
                     ui.label(RichText::new("Action").strong());
-                    ui.label(item["action"].as_str().unwrap_or("—"));
+                    ui.label(item["action"].as_str().unwrap_or("-"));
                 });
             }
         }
@@ -915,7 +973,7 @@ impl KernelOptimizerApp {
         ui.horizontal(|ui| {
             ui.label("Profile file");
             ui.add(egui::TextEdit::singleline(&mut self.profile_path).desired_width(360.0));
-            if ui.button("Open…").clicked()
+            if ui.button("Open...").clicked()
                 && let Some(path) = FileDialog::new().add_filter("TOML profile", &["toml"]).pick_file() {
                     self.profile_path = path.display().to_string();
                     self.load_profile();
@@ -970,7 +1028,7 @@ impl KernelOptimizerApp {
         ui.horizontal(|ui| {
             ui.label("Profile");
             ui.add(egui::TextEdit::singleline(&mut self.profile_path).desired_width(340.0));
-            if ui.button("Browse…").clicked()
+            if ui.button("Browse...").clicked()
                 && let Some(path) = FileDialog::new().add_filter("TOML profile", &["toml"]).pick_file() {
                     self.profile_path = path.display().to_string();
                     self.load_profile();
@@ -1039,7 +1097,7 @@ impl KernelOptimizerApp {
         ui.horizontal(|ui| {
             ui.label("Profile");
             ui.add(egui::TextEdit::singleline(&mut self.profile_path).desired_width(330.0));
-            if ui.button("Browse…").clicked()
+            if ui.button("Browse...").clicked()
                 && let Some(path) = FileDialog::new().add_filter("TOML profile", &["toml"]).pick_file() {
                     self.profile_path = path.display().to_string();
                     self.load_profile();
@@ -1091,7 +1149,7 @@ impl KernelOptimizerApp {
                 ui.add_enabled_ui(self.fio_enabled, |ui| {
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.fio_path).hint_text("Existing test directory").desired_width(190.0));
-                        if ui.button("…").clicked()
+                        if ui.button("...").clicked()
                             && let Some(path) = FileDialog::new().pick_folder() {
                                 self.fio_path = path.display().to_string();
                         }
@@ -1116,7 +1174,7 @@ impl KernelOptimizerApp {
                 ui.label("Baseline report");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.baseline_path).desired_width(220.0));
-                    if ui.button("…").clicked()
+                    if ui.button("...").clicked()
                         && let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).set_file_name("baseline.json").save_file() {
                             self.baseline_path = path.display().to_string();
                     }
@@ -1124,7 +1182,7 @@ impl KernelOptimizerApp {
                 ui.label("Candidate report");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.candidate_path).desired_width(220.0));
-                    if ui.button("…").clicked()
+                    if ui.button("...").clicked()
                         && let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).set_file_name("candidate.json").save_file() {
                             self.candidate_path = path.display().to_string();
                     }
@@ -1138,7 +1196,7 @@ impl KernelOptimizerApp {
                 if ui.add_enabled(!self.running, egui::Button::new("Run candidate benchmark").fill(Color32::from_rgb(35, 105, 135))).clicked() {
                     self.run_benchmark(ReportSlot::Candidate);
                 }
-                if ui.button("Open comparison charts  →").clicked() {
+                if ui.button("Open comparison charts").clicked() {
                     self.page = Page::Compare;
                 }
             });
@@ -1156,7 +1214,7 @@ impl KernelOptimizerApp {
             if let Some(report) = report {
                 ui.label(RichText::new(&report.kernel).strong().color(Color32::from_rgb(93, 204, 224)));
                 ui.label(&report.cpu);
-                ui.label(format!("{} metrics · {} logical CPUs", report.results.len(), report.logical_cpus));
+                ui.label(format!("{} metrics  |  {} logical CPUs", report.results.len(), report.logical_cpus));
                 for result in &report.results {
                     ui.label(format!("{}: {} {}", result.name, format_value(result.median), result.unit));
                 }
@@ -1173,7 +1231,7 @@ impl KernelOptimizerApp {
                 ui.heading("Baseline JSON");
                 ui.add(egui::TextEdit::singleline(&mut self.baseline_path).desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
-                    if ui.button("Browse…").clicked()
+                    if ui.button("Browse...").clicked()
                         && let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).pick_file() {
                             self.baseline_path = path.display().to_string();
                     }
@@ -1189,7 +1247,7 @@ impl KernelOptimizerApp {
                 ui.heading("Candidate JSON");
                 ui.add(egui::TextEdit::singleline(&mut self.candidate_path).desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
-                    if ui.button("Browse…").clicked()
+                    if ui.button("Browse...").clicked()
                         && let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).pick_file() {
                             self.candidate_path = path.display().to_string();
                     }
@@ -1247,11 +1305,11 @@ impl KernelOptimizerApp {
         Self::card(ui, |ui| {
             ui.heading("Comparison context");
             ui.columns(2, |columns| {
-                columns[0].label(RichText::new(format!("Baseline · {}", baseline.kernel)).strong());
-                columns[0].label(format!("{} · {} logical CPUs", baseline.architecture, baseline.logical_cpus));
+                columns[0].label(RichText::new(format!("Baseline  |  {}", baseline.kernel)).strong());
+                columns[0].label(format!("{}  |  {} logical CPUs", baseline.architecture, baseline.logical_cpus));
                 columns[0].label(&baseline.cpu);
-                columns[1].label(RichText::new(format!("Candidate · {}", candidate.kernel)).strong());
-                columns[1].label(format!("{} · {} logical CPUs", candidate.architecture, candidate.logical_cpus));
+                columns[1].label(RichText::new(format!("Candidate  |  {}", candidate.kernel)).strong());
+                columns[1].label(format!("{}  |  {} logical CPUs", candidate.architecture, candidate.logical_cpus));
                 columns[1].label(&candidate.cpu);
             });
             let memory_delta = if baseline.memory_kib > 0 {
@@ -1290,7 +1348,7 @@ impl KernelOptimizerApp {
                     ui.label(RichText::new("n/a").color(Color32::GRAY));
                 }
             });
-            ui.label(format!("{} · {} · higher is {}",
+            ui.label(format!("{}  |  {}  |  higher is {}",
                 old.workload,
                 old.unit,
                 if old.higher_is_better { "better" } else { "worse" }
@@ -1300,8 +1358,8 @@ impl KernelOptimizerApp {
             ui.label(RichText::new("Iteration samples").strong());
             draw_sample_lines(ui, old, new);
             ui.horizontal(|ui| {
-                ui.colored_label(Color32::from_rgb(93, 164, 231), format!("Baseline: median {} · range {}–{}", format_value(old.median), format_value(old.min), format_value(old.max)));
-                ui.colored_label(Color32::from_rgb(91, 202, 173), format!("Candidate: median {} · range {}–{}", format_value(new.median), format_value(new.min), format_value(new.max)));
+                ui.colored_label(Color32::from_rgb(93, 164, 231), format!("Baseline: median {}  |  range {}-{}", format_value(old.median), format_value(old.min), format_value(old.max)));
+                ui.colored_label(Color32::from_rgb(91, 202, 173), format!("Candidate: median {}  |  range {}-{}", format_value(new.median), format_value(new.min), format_value(new.max)));
             });
         });
     }
@@ -1332,7 +1390,7 @@ impl KernelOptimizerApp {
             ui.heading("Apply settings");
             ui.label("Applying writes the two optimizer-managed drop-in files under /etc, reloads sysctl and may reload udev rules.");
             ui.label(RichText::new("Administrator authorization is required. Review the preview before applying.").color(Color32::from_rgb(235, 191, 104)));
-            if ui.add_enabled(!self.running, egui::Button::new("Apply tuning…").fill(Color32::from_rgb(35, 105, 135))).clicked() {
+            if ui.add_enabled(!self.running, egui::Button::new("Apply tuning...").fill(Color32::from_rgb(35, 105, 135))).clicked() {
                 self.request_privileged(PrivilegedAction::Apply);
             }
         });
@@ -1340,56 +1398,252 @@ impl KernelOptimizerApp {
         Self::card(ui, |ui| {
             ui.heading("Revert optimizer settings");
             ui.label("Removes only the two configuration files owned by Kernel Optimizer and reloads the remaining system configuration. It does not guarantee restoration of runtime values changed by other services.");
-            if ui.add_enabled(!self.running, egui::Button::new("Revert tuning…").fill(Color32::from_rgb(126, 67, 66))).clicked() {
+            if ui.add_enabled(!self.running, egui::Button::new("Revert tuning...").fill(Color32::from_rgb(126, 67, 66))).clicked() {
                 self.request_privileged(PrivilegedAction::Revert);
             }
         });
-        if let Some(action) = self.pending_privileged {
-            egui::Window::new("Confirm privileged operation")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(ui.ctx(), |ui| {
-                    match action {
-                        PrivilegedAction::Apply => {
-                            ui.label(format!("Apply the '{}' tuning profile?", self.selected_workload));
-                            ui.label("This modifies system configuration files and reloads kernel settings.");
-                        }
-                        PrivilegedAction::Revert => {
-                            ui.label("Remove Kernel Optimizer's managed tuning files?");
-                            ui.label("This reloads sysctl and udev configuration.");
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() {
-                            self.pending_privileged = None;
-                        }
-                        if ui.button(RichText::new("Authorize with polkit").strong()).clicked() {
-                            self.confirm_privileged();
-                        }
-                    });
-                });
-        }
+
     }
 
     fn install_page(&mut self, ui: &mut egui::Ui) {
-        Self::page_header(ui, "Installation", "Package creation and automated boot-path mutation are not enabled yet.");
+        Self::page_header(
+            ui,
+            "Package and install kernel",
+            "Build a local Arch package from verified staged artifacts. Installation checks run again before pacman is invoked.",
+        );
+
         Self::card(ui, |ui| {
+            ui.heading("Staged kernel");
             ui.horizontal(|ui| {
-                ui.label(RichText::new("DISABLED").color(Color32::from_rgb(235, 191, 104)).strong());
-                ui.heading("Install staged kernel");
+                let stage_response = ui.add(
+                    egui::TextEdit::singleline(&mut self.stage_directory)
+                        .desired_width(450.0)
+                        .hint_text("/var/tmp/kernel-optimizer/stage"),
+                );
+                if stage_response.changed() {
+                    self.install_info = None;
+                }
+                if ui.button("Browse...").clicked()
+                    && let Some(path) = FileDialog::new().pick_folder()
+                {
+                    self.stage_directory = path.display().to_string();
+                }
+                if ui.add_enabled(!self.running, egui::Button::new("Check readiness").fill(Color32::from_rgb(35, 105, 135))).clicked() {
+                    self.run_install_check();
+                }
             });
-            ui.label("The existing CLI install subcommand intentionally returns an error. A staged kernel is not, by itself, an installable or bootable system.");
-            ui.label("The next implementation milestone is a distribution-specific package adapter with collision checks, initramfs integration, module-signing and Secure Boot preflight, boot-entry creation and rollback validation.");
-            ui.add_space(8.0);
-            ui.label("For now, keep using the distribution's supported packaging and bootloader tools. Do not replace the known-good kernel.");
+            ui.label("Uses provenance.json and BUILD-METADATA.txt. The kernel image and entire modules tree are re-hashed before packaging.");
         });
+
+        ui.add_space(10.0);
+        let readiness = self.install_info.clone();
+        let stage_matches = readiness.as_ref()
+            .and_then(|info| info["stage_directory"].as_str())
+            .and_then(|checked| {
+                Some(Path::new(checked).canonicalize().ok()? == Path::new(self.stage_directory.trim()).canonicalize().ok()?)
+            })
+            .unwrap_or(false);
+        if let Some(info) = readiness.as_ref() {
+            ui.columns(3, |columns| {
+                Self::stat_card(
+                    &mut columns[0],
+                    "Distribution",
+                    info["distro"].as_str().unwrap_or("Unknown"),
+                    info["architecture"].as_str().unwrap_or("Unknown architecture"),
+                    Color32::from_rgb(93, 204, 224),
+                );
+                Self::stat_card(
+                    &mut columns[1],
+                    "Staged kernel",
+                    info["kernel_release"].as_str().unwrap_or("Unknown"),
+                    &format!("Currently running: {}", info["current_kernel"].as_str().unwrap_or("Unknown")),
+                    Color32::from_rgb(151, 190, 255),
+                );
+                Self::stat_card(
+                    &mut columns[2],
+                    "Modules",
+                    &format!("{}", info["modules_file_count"].as_u64().unwrap_or(0)),
+                    &format!("{:.2} GiB", info["modules_total_bytes"].as_u64().unwrap_or(0) as f64 / 1024.0_f64.powi(3)),
+                    Color32::from_rgb(125, 208, 161),
+                );
+            });
+            ui.add_space(8.0);
+            Self::card(ui, |ui| {
+                ui.heading("System installation checks");
+                egui::Grid::new("install_readiness_details")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        let image_size = format!(
+                            "{:.1} MiB",
+                            info["kernel_image_size_bytes"].as_u64().unwrap_or(0) as f64 / 1024.0 / 1024.0
+                        );
+                        for (label, value) in [
+                            ("Firmware mode", info["firmware_mode"].as_str().unwrap_or("Unknown")),
+                            ("Secure Boot", info["secure_boot"].as_str().unwrap_or("Unknown")),
+                            ("Module signing", info["module_signing"].as_str().unwrap_or("Unknown")),
+                            ("Initramfs integration", info["initramfs_backend"].as_str().unwrap_or("Unknown")),
+                            ("Bootloader", info["bootloader"].as_str().unwrap_or("Unknown")),
+                            ("/boot mount", info["boot_mount"].as_str().unwrap_or("Unknown")),
+                            ("Package name", info["package_name"].as_str().unwrap_or("Unknown")),
+                            ("Kernel image", image_size.as_str()),
+                        ] {
+                            ui.label(RichText::new(label).strong());
+                            ui.label(value);
+                            ui.end_row();
+                        }
+                    });
+                if info["package_build_ready"].as_bool() == Some(true) {
+                    ui.label(RichText::new("Package build prerequisites are met.").color(Color32::from_rgb(125, 208, 161)));
+                } else {
+                    ui.label(RichText::new("Package build prerequisites are not met.").color(Color32::from_rgb(236, 133, 127)));
+                }
+                if info["installation_ready"].as_bool() == Some(true) {
+                    ui.label(RichText::new("Installation checks currently pass.").color(Color32::from_rgb(125, 208, 161)));
+                } else {
+                    ui.label(RichText::new("Installation is blocked until the issues below are resolved.").color(Color32::from_rgb(235, 191, 104)));
+                }
+            });
+
+            if let Some(blockers) = info["blockers"].as_array()
+                && !blockers.is_empty()
+            {
+                ui.add_space(8.0);
+                Self::card(ui, |ui| {
+                    ui.heading(RichText::new("Installation blockers").color(Color32::from_rgb(236, 133, 127)));
+                    for blocker in blockers {
+                        ui.label(format!("- {}", blocker.as_str().unwrap_or("Unknown blocker")));
+                    }
+                });
+            }
+            if let Some(warnings) = info["warnings"].as_array()
+                && !warnings.is_empty()
+            {
+                ui.add_space(8.0);
+                Self::card(ui, |ui| {
+                    ui.heading(RichText::new("Warnings").color(Color32::from_rgb(235, 191, 104)));
+                    for warning in warnings {
+                        ui.label(format!("- {}", warning.as_str().unwrap_or("Unknown warning")));
+                    }
+                });
+            }
+        } else {
+            Self::card(ui, |ui| {
+                ui.label("Readiness has not been checked yet.");
+                ui.label("Run the check to inspect your distribution, staged files, package tools, Secure Boot state, current kernel, initramfs hooks and bootloader.");
+            });
+        }
+
+        ui.add_space(10.0);
+        Self::card(ui, |ui| {
+            ui.heading("1. Build a local pacman package");
+            ui.label("Runs makepkg as your normal user. It does not install anything or change /boot.");
+            let build_ready = stage_matches
+                && readiness.as_ref().and_then(|value| value["package_build_ready"].as_bool()).unwrap_or(false);
+            if ui.add_enabled(!self.running && build_ready, egui::Button::new("Build package").fill(Color32::from_rgb(35, 105, 135))).clicked() {
+                self.build_install_package();
+            }
+            if !build_ready {
+                ui.label(RichText::new("Check readiness first. Package creation is supported on Arch-family x86_64 systems with makepkg, fakeroot, zstd and bsdtar installed.").color(Color32::from_rgb(235, 191, 104)));
+            }
+        });
+
+        ui.add_space(8.0);
+        Self::card(ui, |ui| {
+            ui.heading("2. Install the generated package");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.install_package_path)
+                        .desired_width(470.0)
+                        .hint_text("Select a generated .pkg.tar.zst file"),
+                );
+                if ui.button("Browse...").clicked()
+                    && let Some(path) = FileDialog::new().add_filter("Arch package", &["zst"]).pick_file()
+                {
+                    self.install_package_path = path.display().to_string();
+                }
+            });
+            ui.label("The app rechecks the staging manifest, package hash, package contents, Secure Boot, running kernel and pacman file conflicts immediately before installation.");
+            let install_ready = stage_matches
+                && readiness.as_ref().and_then(|value| value["installation_ready"].as_bool()).unwrap_or(false);
+            let package_exists = Path::new(self.install_package_path.trim()).is_file();
+            if ui.add_enabled(
+                !self.running && install_ready && package_exists,
+                egui::Button::new("Install package with administrator authorization").fill(Color32::from_rgb(35, 105, 135)),
+            ).clicked() {
+                self.request_privileged(PrivilegedAction::InstallPackage(PathBuf::from(self.install_package_path.trim())));
+            }
+            if !stage_matches {
+                ui.label(RichText::new("The staging path has changed since the last check. Run Check readiness again.").color(Color32::from_rgb(235, 191, 104)));
+            } else if !install_ready {
+                ui.label(RichText::new("Installation remains unavailable until all readiness checks pass.").color(Color32::from_rgb(235, 191, 104)));
+            } else if !package_exists {
+                ui.label("Build a package or select an existing package produced by Kernel Optimizer.");
+            }
+        });
+
+        ui.add_space(8.0);
+        Self::card(ui, |ui| {
+            ui.heading("Boot menu and fallback");
+            ui.label("Package installation allows the distribution's detected mkinitcpio or dracut hooks to generate an initramfs. Kernel Optimizer does not edit GRUB, systemd-boot or rEFInd entries and does not change the default boot target.");
+            ui.label("After installation, add or refresh a bootloader entry using your distribution's instructions. Keep your known-good kernel entry available until the new kernel has booted successfully.");
+            if let Some(info) = readiness.as_ref()
+                && info["bootloader"].as_str().is_some_and(|value| value.starts_with("GRUB"))
+            {
+                ui.label(RichText::new("Detected GRUB. On a standard Arch/Garuda GRUB setup, review the generated entries and then run:").color(Color32::from_rgb(235, 191, 104)));
+                ui.monospace("sudo grub-mkconfig -o /boot/grub/grub.cfg");
+            }
+            ui.label(RichText::new("Secure Boot is not supported for this unsigned kernel package. The app blocks installation if Secure Boot is enabled or cannot be verified on a UEFI system.").color(Color32::from_rgb(235, 191, 104)));
+        });
+    }
+
+    fn privileged_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.pending_privileged.clone() else {
+            return;
+        };
+        let mut cancel = false;
+        let mut confirm = false;
+        egui::Window::new("Confirm privileged operation")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                match &action {
+                    PrivilegedAction::Apply => {
+                        ui.label(format!("Apply the '{}' tuning profile?", self.selected_workload));
+                        ui.label("This writes optimizer-managed system files and reloads sysctl/udev settings.");
+                    }
+                    PrivilegedAction::Revert => {
+                        ui.label("Remove Kernel Optimizer's managed tuning files?");
+                        ui.label("This reloads sysctl and udev configuration.");
+                    }
+                    PrivilegedAction::InstallPackage(package) => {
+                        ui.label("Install this kernel package with pacman?");
+                        ui.label(RichText::new(package.display().to_string()).monospace());
+                        ui.label("The distribution's package hooks may generate an initramfs. The application will not modify bootloader entries or change the default kernel.");
+                    }
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("Authorize with PolicyKit").clicked() {
+                        confirm = true;
+                    }
+                });
+            });
+        if cancel {
+            self.pending_privileged = None;
+        } else if confirm {
+            self.confirm_privileged();
+        }
     }
 
     fn activity_page(&mut self, ui: &mut egui::Ui) {
         Self::page_header(ui, "Activity", "Command output, build progress and diagnostic messages.");
         ui.horizontal(|ui| {
-            ui.label(if self.running { "● Operation running" } else { "○ Idle" });
+            ui.label(if self.running { "Operation running" } else { "Idle" });
             ui.label(RichText::new(&self.status).color(if self.running { Color32::from_rgb(235, 191, 104) } else { Color32::from_rgb(125, 208, 161) }));
             if ui.button("Clear log").clicked() {
                 self.logs.clear();
@@ -1447,7 +1701,7 @@ impl KernelOptimizerApp {
             .show(ui, |ui| {
                 ui.add_space(7.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("◈").size(25.0).color(Color32::from_rgb(93, 204, 224)).strong());
+                    ui.label(RichText::new("KO").size(25.0).color(Color32::from_rgb(93, 204, 224)).strong());
                     ui.vertical(|ui| {
                         ui.label(RichText::new("KERNEL").size(15.0).strong());
                         ui.label(RichText::new("OPTIMIZER").size(11.0).color(Color32::from_rgb(93, 204, 224)).strong());
@@ -1477,9 +1731,9 @@ impl KernelOptimizerApp {
                 ui.separator();
                 ui.label(RichText::new(format!("Running: {}", self.current_kernel)).small().color(Color32::from_rgb(145, 164, 188)));
                 if self.running {
-                    ui.label(RichText::new("● Busy").color(Color32::from_rgb(235, 191, 104)));
+                    ui.label(RichText::new("Busy").color(Color32::from_rgb(235, 191, 104)));
                 } else {
-                    ui.label(RichText::new("● Ready").color(Color32::from_rgb(125, 208, 161)));
+                    ui.label(RichText::new("Ready").color(Color32::from_rgb(125, 208, 161)));
                 }
             });
     }
@@ -1500,7 +1754,7 @@ impl eframe::App for KernelOptimizerApp {
                             ui.spinner();
                             ui.label(RichText::new("Working").color(Color32::from_rgb(235, 191, 104)));
                         } else {
-                            ui.label(RichText::new("● System ready").color(Color32::from_rgb(125, 208, 161)));
+                            ui.label(RichText::new("System ready").color(Color32::from_rgb(125, 208, 161)));
                         }
                         ui.separator();
                         ui.label(RichText::new(format!("Kernel {}", self.current_kernel)).small().color(Color32::from_rgb(145, 164, 188)));
@@ -1530,6 +1784,7 @@ impl eframe::App for KernelOptimizerApp {
                     }
                 });
             });
+        self.privileged_confirmation(&ctx);
     }
 }
 
@@ -1550,6 +1805,17 @@ fn forward_lines<R: Read + Send + 'static>(reader: R, stderr: bool, sender: Send
             }
         }
     }
+}
+
+fn parse_trailing_json_value(output: &str) -> Result<serde_json::Value> {
+    for (index, character) in output.char_indices().rev() {
+        if character == '{'
+            && let Ok(value) = serde_json::from_str(&output[index..])
+        {
+            return Ok(value);
+        }
+    }
+    anyhow::bail!("command output did not end with a valid JSON object")
 }
 
 fn load_benchmark_report(path: &Path) -> Result<BenchmarkReport> {
@@ -1810,5 +2076,30 @@ mod tests {
         let comparison = comparable_metrics(&baseline, &candidate);
         assert_eq!(comparison.len(), 1);
         assert_eq!(comparison[0].change_percent, None);
+    }
+    #[test]
+    fn parser_extracts_final_json_after_streamed_process_logs() {
+        let output = concat!(
+            "checking sources...\n",
+            "building package...\n",
+            "{\n",
+            "  \"path\": \"/tmp/kernel.pkg.tar.zst\",\n",
+            "  \"kernel_release\": \"7.3.4-ko\"\n",
+            "}\n"
+        );
+        let value = parse_trailing_json_value(output).unwrap();
+        assert_eq!(value["kernel_release"], "7.3.4-ko");
+    }
+
+    #[test]
+    fn profile_stage_directory_uses_profile_value_or_default() {
+        assert_eq!(
+            profile_stage_dir("stage_dir = \"/srv/kernel-stage\""),
+            "/srv/kernel-stage"
+        );
+        assert_eq!(
+            profile_stage_dir("version = \"stable\""),
+            "/var/tmp/kernel-optimizer/stage"
+        );
     }
 }

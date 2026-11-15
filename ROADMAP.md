@@ -31,17 +31,17 @@ sufficient proof that a machine can boot it.
 
 ## Priority 3 — Distribution packaging (Arch/Garuda first)
 
-- [ ] Generate a reviewable Arch package build description from staged artifacts.
-- [ ] Package modules, kernel image, System.map and config without invoking pacman.
-- [ ] Detect existing kernel package names and prevent accidental file/package collisions.
+- [x] Generate a reviewable Arch package build description from verified staged artifacts.
+- [x] Package modules, kernel image, System.map and config without installing or invoking pacman.
+- [x] Detect existing package ownership and block conflicting module directories before installation.
 - [ ] Test package build in a disposable clean Arch environment.
-- [ ] Keep package installation as a separate, explicit user action.
+- [x] Keep package installation as a separate, explicit PolicyKit-authorized user action.
 
 ## Priority 4 — Bootability, signing and rollback
 
-- [ ] Detect the actual bootloader, EFI/BIOS mode, ESP, mount state and current boot entries.
-- [ ] Detect initramfs tooling and generate an initramfs only through a supported adapter.
-- [ ] Check module signing and Secure Boot state before proposing installation.
+- [ ] Expand bootloader detection to verify EFI/BIOS mode, ESP mount state and current boot entries.
+- [x] Detect supported mkinitcpio/Dracut package hooks and let the distribution generate the initramfs during package installation.
+- [ ] Add kernel/module signing support; installation currently blocks when Secure Boot is enabled or cannot be verified.
 - [ ] Create a new boot entry without replacing the known-good entry.
 - [ ] Verify the fallback entry remains selectable and provide a tested rollback path.
 - [ ] Require a dry-run plan and explicit confirmation before any boot-path mutation.
@@ -54,7 +54,8 @@ sufficient proof that a machine can boot it.
 - [ ] Add hardware-specific benchmark suites only when their results are reproducible
   and their limitations are clearly reported.
 - [x] Add a native desktop GUI for every currently implemented CLI workflow, with command logs, JSON benchmark import/comparison charts, and privileged actions gated by PolicyKit.
-- [ ] Keep the GUI aligned with future distro packaging and bootability adapters; installation remains disabled until those safety milestones are implemented.
+- [x] Connect the GUI Installation page to Arch-family readiness, package creation and explicit installation actions.
+- [ ] Keep bootloader entry creation and automated rollback disabled until tested distribution-specific adapters exist.
 
 ## Explicit non-goals for the current milestone
 

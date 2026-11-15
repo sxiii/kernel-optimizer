@@ -128,7 +128,7 @@ cargo run --release -- gui
 ```
 
 The GUI is a native Rust/egui desktop application. It provides graphical access to
-all currently implemented CLI workflows: hardware inspection, recommendations,
+all implemented CLI workflows: hardware inspection, recommendations,
 source-track information, profile editing and validation, build dry-runs and builds,
 staged-build finalization, system tuning previews/apply/revert, benchmark execution,
 and benchmark JSON comparison. It includes live command output and activity logs,
@@ -141,10 +141,63 @@ because they require an interactive TTY. Applying or reverting system tuning use
 `pkexec` / PolicyKit for a separate administrator authorization prompt. Run the GUI
 as your ordinary user, not with `sudo`.
 
-The Install page is intentionally marked unavailable. The CLI install command is
-still disabled until distribution-specific packaging, initramfs, module-signing,
-boot-entry and rollback adapters are implemented. The GUI does not bypass that
-safety boundary.
+### Arch/Garuda package and installation workflow
+
+The Installation page supports the first package adapter: Arch Linux and Arch-based
+distributions on x86_64. It is a package workflow, not an automatic bootloader installer.
+
+Check the staged artifacts and local prerequisites:
+
+```sh
+kernel-optimizer install-check --staged /var/tmp/kernel-optimizer/stage
+```
+
+Build a local pacman package as your normal, unprivileged user (never run
+`makepkg` as root):
+
+```sh
+kernel-optimizer package --staged /var/tmp/kernel-optimizer/stage
+```
+
+Install the Arch packaging tools first when needed:
+
+```sh
+sudo pacman -S --needed base-devel zstd libarchive
+```
+
+The generated package is written to `stage/packages/` by default. It contains
+the staged modules, kernel image at `/usr/lib/modules/<release>/vmlinuz`,
+config, System.map (when present), and a `pkgbase` marker. Arch's mkinitcpio
+package hooks use this layout to generate the corresponding initramfs. On Garuda,
+the readiness check also looks for the supported dracut integration. The generated
+package and JSON sidecar are hashed; the installer inspects package metadata and
+required paths before passing it to pacman.
+
+Install from the GUI using the separate PolicyKit confirmation, or from a terminal:
+
+```sh
+pkexec "$(command -v kernel-optimizer)" install \
+  --package /absolute/path/to/kernel-optimizer-*.pkg.tar.zst --yes
+```
+
+The installer rechecks the staging manifest, image/config/modules hashes, package
+contents, current kernel, Secure Boot state, module-signing policy, initramfs hook
+and pacman file ownership immediately before installation. It refuses to replace
+the currently running kernel, blocks forced module-signature configurations whose
+trust chain it cannot verify, and blocks unsigned installs when Secure Boot is
+enabled or cannot be verified. Bootloader entries are not modified.
+
+After reviewing the generated initramfs and image, refresh GRUB manually when
+applicable:
+
+```sh
+sudo grub-mkconfig -o /boot/grub/grub.cfg
+```
+
+For systemd-boot or rEFInd, create/select the matching entry manually. Keep the
+known-good kernel entry and boot it successfully before removing anything. This
+adapter does not sign the kernel or modules, enroll Secure Boot keys, change the
+default boot entry, or support Debian/Fedora packaging yet.
 
 On Arch/Garuda, install the GUI build dependencies if they are not already present:
 
