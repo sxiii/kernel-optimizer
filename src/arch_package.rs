@@ -65,18 +65,14 @@ fn package_name_for_release(release: &str) -> Result<String> {
     if !valid_release(release) {
         bail!("invalid kernel release '{release}'");
     }
-    let mut suffix = String::new();
-    for character in release.chars() {
-        match character {
-            'A'..='Z' => {
-                suffix.push_str("-u");
-                suffix.push(character.to_ascii_lowercase());
-            }
-            'a'..='z' | '0'..='9' | '.' | '_' | '+' | '-' => suffix.push(character),
-            _ => bail!("kernel release contains a character that cannot be represented in an Arch package name"),
-        }
+    if release.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        bail!(
+            "Arch package names must be lowercase; change local_version to lowercase before packaging this kernel"
+        );
     }
-    Ok(format!("linux-optimizer-{suffix}"))
+    // Kernel release characters are already valid pkgname characters, so retaining
+    // them verbatim makes the release-to-package mapping collision-free.
+    Ok(format!("linux-optimizer-{release}"))
 }
 
 fn valid_version(value: &str) -> bool {
@@ -545,8 +541,7 @@ pub fn build(
         let package_path = listed_text
             .lines()
             .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .next_back()
+            .rfind(|line| !line.is_empty())
             .map(PathBuf::from)
             .context("makepkg did not report an output package path")?;
         if package_path.exists() {
@@ -823,6 +818,7 @@ mod tests {
             package_name_for_release("7.3.4+ko").unwrap(),
             package_name_for_release("7.3.4-ko").unwrap()
         );
+        assert!(package_name_for_release("7.3.4-KO").is_err());
         assert_ne!(
             package_name_for_release("7.3.4-ko").unwrap(),
             package_name_for_release("7.3.5-ko").unwrap()
