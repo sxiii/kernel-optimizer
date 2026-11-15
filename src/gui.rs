@@ -1000,7 +1000,7 @@ impl KernelOptimizerApp {
     }
 
     fn build_page(&mut self, ui: &mut egui::Ui) {
-        Self::page_header(ui, "Build kernel", "Select a verified kernel source, then download, configure, compile and stage it.");
+        Self::page_header(ui, "Build kernel", "Select a kernel source, then download, verify its source policy, configure, compile and stage it.");
         ui.horizontal(|ui| {
             ui.label("Profile");
             ui.add(egui::TextEdit::singleline(&mut self.profile_path).desired_width(340.0));
@@ -1065,7 +1065,7 @@ impl KernelOptimizerApp {
         ui.add_space(8.0);
         Self::card(ui, |ui| {
             ui.heading("Before you build");
-            ui.label("Kernel builds can take hours and require substantial disk space. The builder verifies kernel.org signatures and stages output separately from the live boot path.");
+            ui.label("Kernel builds can take hours and require substantial disk space. Signed source tracks are verified; CachyOS and TKG require explicit opt-in and are marked unverified. Output is staged separately from the live boot path.");
             ui.horizontal(|ui| {
                 if ui.add_enabled(!self.running, egui::Button::new("Run doctor").fill(Color32::from_rgb(35, 105, 135))).clicked() {
                     self.run_doctor();
