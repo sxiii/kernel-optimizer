@@ -650,45 +650,104 @@ struct BuildManifest {
 fn build(profile_path:&Path,dry:bool)->Result<()> {
     let mut p:Profile=toml::from_str(&fs::read_to_string(profile_path)?)?;
     validate_profile(&p)?;
-    if p.version=="stable" || p.version=="longterm" {
+    let source_plan = source_adapters::resolve(&p.source, &p.version, p.allow_unverified_sources)
+        .context("resolving selected kernel source")?;
+    if let Some(plan) = source_plan.as_ref() {
+        p.version = plan.version.clone();
+    } else if p.version=="stable" || p.version=="longterm" {
         let moniker = release_moniker(&p.source)?;
         p.version=latest_release(moniker)?;
     }
+
     let src=p.build_dir.join(format!("linux-{}",p.version));
-    let archive=p.build_dir.join(format!("linux-{}.tar.xz",p.version));
-    let signature=p.build_dir.join(format!("linux-{}.tar.sign",p.version));
-    let major=p.version.split('.').next().context("kernel version has no major component")?;
-    let url=format!("https://cdn.kernel.org/pub/linux/kernel/v{major}.x/linux-{}.tar.xz",p.version);
-    let signature_url=format!("https://cdn.kernel.org/pub/linux/kernel/v{major}.x/linux-{}.tar.sign",p.version);
+    let (url, archive_name, signature_url, signature_name, archive_format) =
+        if let Some(plan) = source_plan.as_ref() {
+            (plan.archive_url.clone(), plan.archive_name.clone(),
+             plan.signature_url.clone(), plan.signature_name.clone(), plan.archive_format)
+        } else {
+            let major=p.version.split('.').next().context("kernel version has no major component")?;
+            let base=format!("https://cdn.kernel.org/pub/linux/kernel/v{major}.x");
+            (format!("{base}/linux-{}.tar.xz",p.version),
+             format!("linux-{}.tar.xz",p.version),
+             Some(format!("{base}/linux-{}.tar.sign",p.version)),
+             Some(format!("linux-{}.tar.sign",p.version)),
+             source_adapters::ArchiveFormat::KernelXz)
+        };
+    let archive=p.build_dir.join(&archive_name);
+    let signature=signature_name.as_ref().map(|name| p.build_dir.join(name));
+    let signature_url_text=signature_url.clone().unwrap_or_default();
+
     println!("Kernel: {}{}",p.version,p.local_version);
+    println!("Source: {}", source_plan.as_ref().map(|plan| plan.project.as_str()).unwrap_or("Linux kernel.org"));
     println!("CPU: {}",hardware::detect().cpu.model);
     println!("Jobs: {}",p.jobs);
     println!("Compiler: {} (ccache: {}, mold requested: {})",p.compiler,p.ccache,p.use_mold);
     println!("Optimization profile: {} (currently informational; no unsafe CPU-specific flags injected)",p.optimization);
-    println!("Source: {url}");
-    println!("Signature: {signature_url}");
+    println!("Source archive: {url}");
+    if let Some(signature_url) = signature_url.as_deref() { println!("Signature: {signature_url}"); }
+    if let Some(plan) = source_plan.as_ref() {
+        println!("Source provenance: {}", plan.trust_reference);
+        if !matches!(p.source.as_str(), "linux-zen" | "linux-rt") {
+            println!("WARNING: this source track is not independently signature-verified; it cannot be packaged by the verified Arch package workflow.");
+        }
+    }
     println!("Build dir: {}",src.display());
     if dry {println!("Dry run only. No files changed.");return Ok(());}
+
     fs::create_dir_all(&p.build_dir)?;
     let started_unix=unix_timestamp();
     let build_timer=Instant::now();
-    ensure_kernel_archive(&archive, &url)?;
-    download_signature(&signature, &signature_url)?;
+    match archive_format {
+        source_adapters::ArchiveFormat::KernelXz => ensure_kernel_archive(&archive, &url)?,
+        source_adapters::ArchiveFormat::GzipTar => {
+            download_signature(&archive, &url)?;
+            run_checked(Command::new("gzip").arg("-t").arg(&archive))?;
+        }
+    }
     let archive_sha256_before=provenance::sha256_file(&archive)?;
-    let signature_sha256_before=provenance::sha256_file(&signature)?;
-    let signature_verification=provenance::verify_kernel_archive(&archive,&signature,p.gpg_home.as_deref())?;
-    let archive_sha256=provenance::sha256_file(&archive)?;
-    let signature_sha256=provenance::sha256_file(&signature)?;
-    if archive_sha256 != archive_sha256_before || signature_sha256 != signature_sha256_before {
+    let signature_sha256_before=signature.as_deref().map(provenance::sha256_file).transpose()?;
+    if let (Some(signature_path), Some(signature_url)) = (signature.as_deref(), signature_url.as_deref()) {
+        download_signature(signature_path, signature_url)?;
+    }
+    let base_signature_verification = if let Some(signature_path) = signature.as_deref() {
+        Some(provenance::verify_kernel_archive(&archive,signature_path,p.gpg_home.as_deref())?)
+    } else {
+        None
+    };
+    let archive_sha256=source_adapters::verify_archive_digest(
+        &archive,
+        source_plan.as_ref().and_then(|plan| plan.expected_archive_sha256.as_deref()),
+    )?;
+    let signature_sha256=signature.as_deref().map(provenance::sha256_file).transpose()?.unwrap_or_default();
+    if archive_sha256 != archive_sha256_before
+        || signature_sha256_before.as_ref().is_some_and(|before| before != &signature_sha256)
+    {
         bail!("kernel archive or detached signature changed during verification; refusing to build");
     }
-    println!("Verified source signature by {} ({})",
-        signature_verification.signer_name,signature_verification.signer_primary_fingerprint);
-    let preserved_config=refresh_source_tree(&archive,&src,&p.build_dir,&p.version)?;
-    if provenance::sha256_file(&archive)? != archive_sha256 {
-        bail!("kernel archive changed after signature verification; refusing to build");
+    if let Some(verification) = base_signature_verification.as_ref() {
+        println!("Verified base source signature by {} ({})",
+            verification.signer_name,verification.signer_primary_fingerprint);
+    } else {
+        println!("Source archive digest matched the upstream GitHub release metadata; no trusted detached signature was available.");
     }
-    println!("Extracted a clean source tree from the signed archive{}.",
+
+    let preserved_config=if archive_format == source_adapters::ArchiveFormat::GzipTar {
+        refresh_source_tree_with_layout(&archive,&src,&p.build_dir,&p.version,true)?
+    } else {
+        refresh_source_tree(&archive,&src,&p.build_dir,&p.version)?
+    };
+    if provenance::sha256_file(&archive)? != archive_sha256 {
+        bail!("source archive changed after verification; refusing to build");
+    }
+    let patch_provenance = if let Some(plan) = source_plan.as_ref() {
+        source_adapters::download_and_apply_patches(plan, &src, &p.build_dir, p.gpg_home.as_deref())?
+    } else {
+        Vec::new()
+    };
+    if !patch_provenance.is_empty() {
+        println!("Applied {} source patch(es) with the configured provenance policy.", patch_provenance.len());
+    }
+    println!("Extracted a clean source tree{}.",
         if preserved_config { "; preserved the prior .config" } else { "" });
     let config=src.join(".config");
     let config_origin = if preserved_config {
