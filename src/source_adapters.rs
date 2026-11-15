@@ -15,6 +15,7 @@ pub struct PatchPlan {
     pub url: String,
     pub signature_url: Option<String>,
     pub expected_sha256: Option<String>,
+    pub expected_git_blob_sha1: Option<String>,
     pub signer_name: Option<&'static str>,
     pub signer_fingerprint: Option<&'static str>,
     pub compression: PatchCompression,
@@ -40,6 +41,7 @@ pub struct PatchProvenance {
     pub name: String,
     pub url: String,
     pub sha256: String,
+    pub git_blob_sha1: String,
     pub signature_url: String,
     pub signature_sha256: String,
     pub signature_verified: bool,
@@ -111,7 +113,7 @@ fn resolve_zen(requested: &str) -> Result<SourcePlan> {
         expected_archive_sha256: None,
         trust_reference: format!("https://github.com/zen-kernel/zen-kernel/releases/tag/{tag}"),
         patches: vec![PatchPlan { name: patch_name, url: patch_url, signature_url: Some(signature_url),
-            expected_sha256: digest, signer_name: Some(SIGNER), signer_fingerprint: Some(FINGERPRINT),
+            expected_sha256: digest, expected_git_blob_sha1: None, signer_name: Some(SIGNER), signer_fingerprint: Some(FINGERPRINT),
             compression: PatchCompression::Zstd, signature_covers_compressed_file: true }],
     })
 }
@@ -138,7 +140,7 @@ fn resolve_rt(requested: &str) -> Result<SourcePlan> {
         signature_url: Some(signature), signature_name: Some(format!("linux-{version}.tar.sign")),
         expected_archive_sha256: None, trust_reference: index_url.clone(),
         patches: vec![PatchPlan { name: format!("{stem}.xz"), url: format!("{index_url}{stem}.xz"),
-            signature_url: Some(format!("{index_url}{stem}.sign")), expected_sha256: None,
+            signature_url: Some(format!("{index_url}{stem}.sign")), expected_sha256: None, expected_git_blob_sha1: None,
             signer_name: Some(SIGNER), signer_fingerprint: Some(FINGERPRINT),
             compression: PatchCompression::Xz, signature_covers_compressed_file: false }],
     })
@@ -166,8 +168,14 @@ fn resolve_tkg(requested: &str, allow_unverified: bool) -> Result<SourcePlan> {
     if !allow_unverified {
         bail!("Linux TKG patchsets are unsigned. Set allow_unverified_sources = true to accept the pinned GitHub patch revision; these builds remain non-packageable.");
     }
+    if requested == "longterm" {
+        bail!("Linux TKG tracks upstream stable releases, not the longterm kernel; choose version = \"stable\" or a specific X.Y.Z release");
+    }
     let latest = latest_stable()?;
     let version = if requested == "stable" { latest } else { requested.to_owned() };
+    if !Regex::new(r"^\d+\.\d+\.\d+$")?.is_match(&version) {
+        bail!("Linux TKG requires a full X.Y.Z kernel release version");
+    }
     let tag = format!("v{version}");
     let reference = get_json(&format!("https://api.github.com/repos/Frogging-Family/linux-tkg/git/ref/tags/{tag}"))
         .with_context(|| format!("resolving TKG release tag {tag}"))?;
@@ -178,16 +186,20 @@ fn resolve_tkg(requested: &str, allow_unverified: bool) -> Result<SourcePlan> {
     }
     let series = version.split('.').take(2).collect::<Vec<_>>().join(".");
     let directory = get_json(&format!("https://api.github.com/repos/Frogging-Family/linux-tkg/contents/linux-tkg-patches/{series}?ref={commit}"))?;
-    let names = directory.as_array().context("TKG release lacks patches for this kernel series")?
-        .iter().filter_map(|v| v["name"].as_str()).collect::<Vec<_>>();
+    let entries = directory.as_array().context("TKG release lacks patches for this kernel series")?;
     let selected = ["0003-glitched-base.patch", "0003-glitched-eevdf-additions.patch"];
+    let mut patch_specs = Vec::new();
     for name in selected {
-        if !names.contains(&name) { bail!("TKG release {tag} is missing curated patch {name}; refusing to substitute another patchset"); }
+        let entry = entries.iter().find(|entry| entry["name"].as_str() == Some(name))
+            .with_context(|| format!("TKG release {tag} is missing curated patch {name}; refusing to substitute another patchset"))?;
+        let blob_sha = entry["sha"].as_str().context("TKG patch listing omitted its Git blob SHA-1")?;
+        patch_specs.push((name, blob_sha.to_owned()));
     }
-    let patches = selected.iter().map(|name| PatchPlan {
+    let patches = patch_specs.iter().map(|(name, blob_sha)| PatchPlan {
         name: (*name).to_owned(),
         url: format!("https://raw.githubusercontent.com/Frogging-Family/linux-tkg/{commit}/linux-tkg-patches/{series}/{name}"),
-        signature_url: None, expected_sha256: None, signer_name: None, signer_fingerprint: None,
+        signature_url: None, expected_sha256: None, expected_git_blob_sha1: Some(blob_sha.clone()),
+        signer_name: None, signer_fingerprint: None,
         compression: PatchCompression::Plain, signature_covers_compressed_file: false,
     }).collect();
     let (archive_url, signature) = kernel_archive(&version);
@@ -248,6 +260,20 @@ pub fn download_and_apply_patches(plan: &SourcePlan, source_dir: &Path, build_di
         let downloaded = build_dir.join(&filename);
         download(&patch.url, &downloaded)?;
         let digest = crate::provenance::sha256_file(&downloaded)?;
+        let git_blob_sha1 = if let Some(expected) = patch.expected_git_blob_sha1.as_deref() {
+            let output = Command::new("git").args(["hash-object", "--no-filters"]).arg(&downloaded)
+                .output().context("running git hash-object to verify the pinned TKG patch blob")?;
+            if !output.status.success() {
+                bail!("git hash-object failed while verifying TKG patch {}: {}", patch.name, String::from_utf8_lossy(&output.stderr).trim());
+            }
+            let actual = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if actual != expected {
+                bail!("Git blob hash mismatch for TKG patch {}; refusing to apply it", patch.name);
+            }
+            actual
+        } else {
+            String::new()
+        };
         if patch.expected_sha256.as_ref().is_some_and(|expected| expected != &digest) {
             bail!("SHA-256 mismatch for patch {}; refusing to apply it", patch.name);
         }
@@ -275,7 +301,7 @@ pub fn download_and_apply_patches(plan: &SourcePlan, source_dir: &Path, build_di
             .with_context(|| format!("applying patch {}", patch.name))?;
         if !status.success() { bail!("patch {} does not apply cleanly to Linux {}", patch.name, plan.version); }
         manifests.push(PatchProvenance {
-            name: patch.name.clone(), url: patch.url.clone(), sha256: digest,
+            name: patch.name.clone(), url: patch.url.clone(), sha256: digest, git_blob_sha1,
             signature_url: patch.signature_url.clone().unwrap_or_default(), signature_sha256: signature_sha,
             signature_verified: verified, signer_name, signer_primary_fingerprint: signer_fingerprint,
             source_revision: plan.trust_reference.clone(),
