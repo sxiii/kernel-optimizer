@@ -1561,7 +1561,7 @@ mod source_adapter_tests {
         assert_eq!(release_moniker("linux").unwrap(), "stable");
         assert_eq!(release_moniker("linux-lts").unwrap(), "longterm");
         for source in ["linux-zen", "linux-cachyos", "linux-tkg", "linux-rt"] {
-            assert!(release_moniker(source).is_err());
+            assert_eq!(release_moniker(source).unwrap(), "stable");
         }
     }
 }
