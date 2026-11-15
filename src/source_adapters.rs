@@ -238,6 +238,37 @@ fn download(url: &str, destination: &Path) -> Result<()> {
     result
 }
 
+fn validate_patch_paths(patch_path: &Path) -> Result<()> {
+    use std::path::Component;
+
+    let patch = fs::read_to_string(patch_path)
+        .with_context(|| format!("reading patch file {}", patch_path.display()))?;
+    let mut file_headers = 0usize;
+    for line in patch.lines() {
+        let Some(raw_path) = line.strip_prefix("--- ").or_else(|| line.strip_prefix("+++ ")) else {
+            continue;
+        };
+        let candidate = raw_path.split_whitespace().next()
+            .context("patch contains an empty file path header")?;
+        if candidate == "/dev/null" {
+            continue;
+        }
+        if candidate.starts_with('"') || candidate.starts_with('/') || candidate.starts_with('\\') {
+            bail!("patch contains an absolute or quoted path; refusing to apply it");
+        }
+        if Path::new(candidate).components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            bail!("patch contains an unsafe path header '{candidate}'; refusing to apply it");
+        }
+        file_headers += 1;
+    }
+    if file_headers == 0 {
+        bail!("patch contains no safe ---/+++ file headers; refusing to apply it");
+    }
+    Ok(())
+}
+
 fn decompress_patch(input: &Path, output: &Path, compression: PatchCompression) -> Result<()> {
     if compression == PatchCompression::Plain { fs::copy(input, output)?; return Ok(()); }
     let (program, args): (&str, &[&str]) = match compression {
@@ -296,6 +327,7 @@ pub fn download_and_apply_patches(plan: &SourcePlan, source_dir: &Path, build_di
             signer_fingerprint = verification.signer_primary_fingerprint;
             true
         } else { false };
+        validate_patch_paths(&expanded)?;
         let status = Command::new("patch").args(["--batch", "--forward", "--fuzz=0", "-p1", "-i"])
             .arg(&expanded).current_dir(source_dir).status()
             .with_context(|| format!("applying patch {}", patch.name))?;
@@ -316,4 +348,32 @@ pub fn verify_archive_digest(path: &Path, expected: Option<&str>) -> Result<Stri
         bail!("source archive SHA-256 does not match the digest advertised by its upstream release");
     }
     Ok(actual)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_patch(contents: &str) -> PathBuf {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let path = std::env::temp_dir().join(format!("kernel-optimizer-patch-{}-{stamp}.patch", std::process::id()));
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn patch_path_validation_rejects_parent_traversal() {
+        let path = temp_patch("--- a/../../outside\\n+++ b/../../outside\\n@@ -1 +1 @@\\n-old\\n+new\\n");
+        assert!(validate_patch_paths(&path).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn patch_path_validation_allows_normal_paths_and_dev_null() {
+        let path = temp_patch("--- /dev/null\\n+++ b/drivers/example.c\\n@@ -0,0 +1 @@\\n+example\\n");
+        assert!(validate_patch_paths(&path).is_ok());
+        fs::remove_file(path).unwrap();
+    }
 }
