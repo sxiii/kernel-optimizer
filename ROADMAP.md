@@ -53,7 +53,8 @@ sufficient proof that a machine can boot it.
 - [ ] Test supported paths on Arch/Garuda, Debian/Ubuntu and Fedora.
 - [ ] Add hardware-specific benchmark suites only when their results are reproducible
   and their limitations are clearly reported.
-- [ ] Consider a graphical interface after CLI/TUI workflows and safety guarantees stabilize.
+- [x] Add a native desktop GUI for every currently implemented CLI workflow, with command logs, JSON benchmark import/comparison charts, and privileged actions gated by PolicyKit.
+- [ ] Keep the GUI aligned with future distro packaging and bootability adapters; installation remains disabled until those safety milestones are implemented.
 
 ## Explicit non-goals for the current milestone
 

@@ -117,6 +117,45 @@ cargo build --release
 sudo install -Dm755 target/release/kernel-optimizer /usr/local/bin/kernel-optimizer
 ```
 
+## Native desktop GUI
+
+Launch the desktop application with:
+
+```sh
+kernel-optimizer gui
+# Or while developing:
+cargo run --release -- gui
+```
+
+The GUI is a native Rust/egui desktop application. It provides graphical access to
+all currently implemented CLI workflows: hardware inspection, recommendations,
+source-track information, profile editing and validation, build dry-runs and builds,
+staged-build finalization, system tuning previews/apply/revert, benchmark execution,
+and benchmark JSON comparison. It includes live command output and activity logs,
+native file pickers, median comparison bars, and per-iteration sample charts.
+
+The build, benchmark, tuning and comparison pages call the existing CLI implementation;
+the GUI does not maintain a second copy of the kernel-build or tuning logic. A
+`menuconfig` build and the existing terminal dashboard open in an external terminal
+because they require an interactive TTY. Applying or reverting system tuning uses
+`pkexec` / PolicyKit for a separate administrator authorization prompt. Run the GUI
+as your ordinary user, not with `sudo`.
+
+The Install page is intentionally marked unavailable. The CLI install command is
+still disabled until distribution-specific packaging, initramfs, module-signing,
+boot-entry and rollback adapters are implemented. The GUI does not bypass that
+safety boundary.
+
+On Arch/Garuda, install the GUI build dependencies if they are not already present:
+
+```sh
+sudo pacman -S --needed libxcb libxkbcommon wayland dbus mesa
+```
+
+The native file picker uses the XDG Desktop Portal when available and can fall back
+to a desktop file-dialog helper. A running PolicyKit authentication agent is needed
+for privileged tuning actions.
+
 ## Usage
 
 ```sh
