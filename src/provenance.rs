@@ -219,6 +219,56 @@ pub fn verify_kernel_archive(
     verify_kernel_archive_with_signers(archive, signature, gpg_home, TRUSTED_SIGNERS)
 }
 
+pub fn verify_detached_file(
+    file: &Path,
+    signature: &Path,
+    gpg_home: Option<&Path>,
+    signer_name: &str,
+    signer_fingerprint: &str,
+) -> Result<SignatureVerification> {
+    if !file.is_file() {
+        bail!("signed source file does not exist: {}", file.display());
+    }
+    if !signature.is_file() {
+        bail!("detached signature does not exist: {}", signature.display());
+    }
+    let trusted = [TrustedSigner {
+        name: signer_name,
+        fingerprint: signer_fingerprint,
+    }];
+    let mut command = Command::new("gpg");
+    command.args([
+        "--no-options",
+        "--batch",
+        "--no-auto-key-import",
+        "--no-auto-key-retrieve",
+        "--no-auto-key-locate",
+        "--status-fd=1",
+    ]);
+    if let Some(home) = gpg_home {
+        if !home.is_dir() {
+            bail!("configured GPG home is not a directory: {}", home.display());
+        }
+        command.arg("--homedir").arg(home);
+    }
+    let output = command
+        .arg("--verify")
+        .arg(signature)
+        .arg(file)
+        .output()
+        .context("starting GnuPG to verify the upstream patch signature")?;
+    if !output.status.success() {
+        bail!(
+            "detached patch signature verification failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    signer_from_status_with_signers(
+        &String::from_utf8_lossy(&output.stdout),
+        &trusted,
+    ).context("patch signature did not match its pinned signer fingerprint")
+}
+
 pub fn trusted_key_available(gpg_home: Option<&Path>) -> Result<Option<String>> {
     let mut command = Command::new("gpg");
     command.args(["--no-options", "--batch"]);
