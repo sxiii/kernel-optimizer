@@ -132,14 +132,14 @@ fn output(program: &str, args: &[&str]) -> String {
 }
 
 fn sources() {
-    println!("SOURCE            TRACK / PURPOSE");
-    println!("linux             Latest stable upstream kernel (kernel.org)");
-    println!("linux-lts          Long-term support upstream series");
-    println!("linux-zen          Desktop responsiveness / low-latency patchset (Arch)");
-    println!("linux-cachyos      CachyOS patches and scheduler/config profiles");
-    println!("linux-tkg          Community kernel patch/config framework (TKG)");
-    println!("linux-rt           PREEMPT_RT real-time patchset (specialized workloads)");
-    println!("\nOnly upstream linux is fetched automatically in this initial release. Other tracks are listed as planned adapters; no untrusted patch URL is executed.");
+    println!("SOURCE            STATUS       TRACK / PURPOSE");
+    println!("linux             SUPPORTED    Latest stable upstream kernel (kernel.org; signed tarball)");
+    println!("linux-lts          SUPPORTED    Latest longterm upstream kernel (kernel.org; signed tarball)");
+    println!("linux-zen          PLANNED      Zen patchset (requires pinned signed source adapter)");
+    println!("linux-cachyos      PLANNED      CachyOS patch/config track (requires audited patch manifest)");
+    println!("linux-tkg          PLANNED      TKG framework (scripts are not executed by this builder)");
+    println!("linux-rt           PLANNED      PREEMPT_RT patchset (requires separate signer validation)");
+    println!("\nOnly SUPPORTED tracks can be built. Planned tracks remain visible but fail closed until their source and patch provenance can be verified.");
 }
 fn profile(file:&Path,create:bool)->Result<()> {
     if create { let p=toml::to_string_pretty(&Profile::default())?; fs::write(file,p).with_context(||format!("writing {}",file.display()))?; println!("Created {}",file.display()); }
@@ -150,12 +150,22 @@ fn run_checked(cmd:&mut Command)->Result<()> {
     let shown=format!("{cmd:?}"); let status=cmd.status().with_context(||format!("starting {shown}"))?;
     if !status.success(){bail!("command failed ({status}): {shown}");} Ok(())
 }
-fn latest_stable()->Result<String> {
-    let client=reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).user_agent("kernel-optimizer/0.1").build()?;
+fn latest_release(moniker: &str)->Result<String> {
+    let client=reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).user_agent("kernel-optimizer/0.2").build()?;
     let body=client.get("https://www.kernel.org/releases.json").send()?.error_for_status()?.text()?;
     let v:serde_json::Value=serde_json::from_str(&body)?;
     let versions=v["releases"].as_array().context("kernel.org releases response missing releases")?;
-    versions.iter().find(|x|x["moniker"]=="stable").and_then(|x|x["version"].as_str()).map(str::to_string).context("stable version not found")
+    versions.iter().find(|x|x["moniker"].as_str()==Some(moniker))
+        .and_then(|x|x["version"].as_str()).map(str::to_string)
+        .with_context(|| format!("kernel.org {moniker} release not found"))
+}
+
+fn release_moniker(source: &str)->Result<&'static str> {
+    match source {
+        "linux" => Ok("stable"),
+        "linux-lts" => Ok("longterm"),
+        other => bail!("source '{other}' does not yet have a verified source adapter; currently buildable sources are linux and linux-lts"),
+    }
 }
 fn ensure_kernel_archive(archive: &Path, url: &str) -> Result<()> {
     let cached_is_valid = archive.exists()
@@ -342,8 +352,8 @@ fn verify_staged_kernel(stage: &Path, release: &str) -> Result<(String, String, 
 
 fn validate_profile(p: &Profile) -> Result<()> {
     if !(1..=4096).contains(&p.jobs) { bail!("jobs must be between 1 and 4096"); }
-    if p.source != "linux" { bail!("source '{}' is not supported by the safe builder yet; use source=linux", p.source); }
-    if p.version != "stable" && !Regex::new(r"^\d+\.\d+(\.\d+)?$")?.is_match(&p.version) { bail!("invalid kernel version: {}", p.version); }
+    let _ = release_moniker(&p.source)?;
+    if p.version != "stable" && p.version != "longterm" && !Regex::new(r"^\d+\.\d+(\.\d+)?$")?.is_match(&p.version) { bail!("invalid kernel version: {}", p.version); }
     if p.local_version.contains('/') || p.local_version.contains(' ') || p.local_version.contains('\n') { bail!("local_version may not contain slash, spaces or newlines"); }
     if !matches!(p.config_base.as_str(), "current" | "defconfig") { bail!("unsupported config_base '{}' (use current or defconfig)", p.config_base); }
     if !matches!(p.compiler.as_str(), "gcc" | "clang") { bail!("unsupported compiler {}; use gcc or clang", p.compiler); }
@@ -620,7 +630,10 @@ struct BuildManifest {
 fn build(profile_path:&Path,dry:bool)->Result<()> {
     let mut p:Profile=toml::from_str(&fs::read_to_string(profile_path)?)?;
     validate_profile(&p)?;
-    if p.version=="stable" {p.version=latest_stable()?;}
+    if p.version=="stable" || p.version=="longterm" {
+        let moniker = release_moniker(&p.source)?;
+        p.version=latest_release(moniker)?;
+    }
     let src=p.build_dir.join(format!("linux-{}",p.version));
     let archive=p.build_dir.join(format!("linux-{}.tar.xz",p.version));
     let signature=p.build_dir.join(format!("linux-{}.tar.sign",p.version));
@@ -758,7 +771,7 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     let mut recorded_profile=p.clone();
     recorded_profile.gpg_home=None;
     let source_manifest=SourceProvenance {
-        project:"Linux kernel.org upstream".into(),
+        project:format!("Linux kernel.org {} track", if p.source == "linux-lts" { "longterm" } else { "stable" }),
         version:p.version.clone(),
         archive_url:url,
         archive_sha256,
@@ -872,7 +885,7 @@ fn infer_finalize_version(p: &Profile, override_version: Option<&str>) -> Result
         if !version_pattern.is_match(version) {
             bail!("invalid kernel version '{version}'; expected X.Y or X.Y.Z");
         }
-        if p.version != "stable" && p.version != version {
+        if p.version != "stable" && p.version != "longterm" && p.version != version {
             bail!(
                 "requested version {version} does not match profile version {}; update the profile or omit --version",
                 p.version
@@ -1402,5 +1415,19 @@ mod tests {
         assert!(result.is_err());
         assert!(source.is_symlink());
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod source_adapter_tests {
+    use super::*;
+
+    #[test]
+    fn stable_and_lts_tracks_resolve_to_distinct_kernel_org_monikers() {
+        assert_eq!(release_moniker("linux").unwrap(), "stable");
+        assert_eq!(release_moniker("linux-lts").unwrap(), "longterm");
+        for source in ["linux-zen", "linux-cachyos", "linux-tkg", "linux-rt"] {
+            assert!(release_moniker(source).is_err());
+        }
     }
 }

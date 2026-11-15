@@ -380,6 +380,17 @@ impl KernelOptimizerApp {
         }
     }
 
+    fn set_profile_source(&mut self, source: &str) -> Result<()> {
+        let mut value: toml::Value = toml::from_str(&self.profile_text)
+            .context("profile text is not valid TOML")?;
+        let table = value.as_table_mut().context("profile root must be a TOML table")?;
+        table.insert("source".into(), toml::Value::String(source.to_owned()));
+        self.profile_text = toml::to_string_pretty(&value)?;
+        self.profile_dirty = true;
+        self.log(format!("Selected kernel source: {source}"));
+        Ok(())
+    }
+
     fn save_profile(&mut self) -> Result<()> {
         let _: toml::Value = toml::from_str(&self.profile_text)
             .context("profile text is not valid TOML")?;
@@ -914,7 +925,7 @@ impl KernelOptimizerApp {
             ui.label(RichText::new(&self.sources_text).monospace());
         });
         ui.add_space(8.0);
-        ui.label(RichText::new("Current implementation: upstream linux only. Other listed sources are informational and cannot be selected for builds yet.").color(Color32::from_rgb(235, 191, 104)));
+        ui.label(RichText::new("Linux stable and Linux LTS are buildable now. Zen, CachyOS, TKG and PREEMPT_RT remain visible but disabled until their independent source signatures, patch manifests and version mappings are implemented.").color(Color32::from_rgb(235, 191, 104)));
     }
 
     fn profile_page(&mut self, ui: &mut egui::Ui) {
@@ -973,7 +984,7 @@ impl KernelOptimizerApp {
     }
 
     fn build_page(&mut self, ui: &mut egui::Ui) {
-        Self::page_header(ui, "Build kernel", "Preflight and compile a signed upstream kernel into the staging directory.");
+        Self::page_header(ui, "Build kernel", "Select a verified kernel source, then download, configure, compile and stage it.");
         ui.horizontal(|ui| {
             ui.label("Profile");
             ui.add(egui::TextEdit::singleline(&mut self.profile_path).desired_width(340.0));
@@ -986,6 +997,41 @@ impl KernelOptimizerApp {
                 self.page = Page::Profile;
             }
         });
+        let configured_source = toml::from_str::<toml::Value>(&self.profile_text)
+            .ok()
+            .and_then(|value| value.get("source").and_then(toml::Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| "linux".into());
+        let mut selected_source = configured_source.clone();
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_label("Kernel source")
+                .selected_text(match configured_source.as_str() {
+                    "linux-lts" => "Linux LTS (kernel.org longterm)",
+                    "linux-zen" => "Linux Zen (not yet supported)",
+                    "linux-cachyos" => "CachyOS (not yet supported)",
+                    "linux-tkg" => "Linux TKG (not yet supported)",
+                    "linux-rt" => "PREEMPT_RT (not yet supported)",
+                    _ => "Linux stable (kernel.org)",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut selected_source, "linux".into(), "Linux stable - signed kernel.org release");
+                    ui.selectable_value(&mut selected_source, "linux-lts".into(), "Linux LTS - signed kernel.org longterm release");
+                    ui.add_enabled_ui(false, |ui| { ui.label("Linux Zen - source adapter pending"); });
+                    ui.add_enabled_ui(false, |ui| { ui.label("CachyOS - source adapter pending"); });
+                    ui.add_enabled_ui(false, |ui| { ui.label("Linux TKG - source adapter pending"); });
+                    ui.add_enabled_ui(false, |ui| { ui.label("PREEMPT_RT - source adapter pending"); });
+                });
+            if selected_source != configured_source {
+                if let Err(error) = self.set_profile_source(&selected_source) {
+                    self.log(format!("Could not change kernel source: {error:#}"));
+                }
+            }
+        });
+        if configured_source == "linux-lts" {
+            ui.label(RichText::new("LTS builds automatically resolve the latest longterm release from kernel.org.").color(Color32::from_rgb(125, 208, 161)));
+        } else if !matches!(configured_source.as_str(), "linux") {
+            ui.label(RichText::new("This source does not yet have an audited downloader/patch adapter and cannot be built.").color(Color32::from_rgb(235, 191, 104)));
+        }
+
         ui.add_space(8.0);
         Self::card(ui, |ui| {
             ui.heading("Before you build");

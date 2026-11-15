@@ -14,7 +14,7 @@ The running kernel and bootloader are not modified by the build command.
 
 - [x] Hardware inventory and workload-aware, read-only recommendations.
 - [x] Interactive read-only terminal dashboard.
-- [x] Upstream stable kernel discovery, configurable build profiles, and staged builds.
+- [x] Upstream stable and long-term-support kernel discovery, configurable build profiles, and staged builds.
 - [x] Staged kernel image verification, pinned OpenPGP source-signature verification, and SHA-256 build provenance.
 - [x] Read-only build preflight (doctor) for dependencies, config source and disk space.
 - [x] Workload-aware sysctl/I/O-scheduler preview, apply and revert.
@@ -46,7 +46,7 @@ Optional tools such as `lspci`, `lsblk`, `zcat` and `menuconfig` enhance inspect
 
 ## Verified upstream kernel sources
 
-The upstream builder downloads both `linux-X.Y.Z.tar.xz` and its detached
+The upstream stable/LTS builder downloads the selected `linux-X.Y.Z.tar.xz` and its detached
 `linux-X.Y.Z.tar.sign` signature. Kernel.org signs the **uncompressed tar stream**,
 not the compressed XZ file. The application therefore streams
 `xz --decompress --stdout` into GnuPG's detached-signature verifier.
@@ -173,7 +173,7 @@ kernel-optimizer build --dry-run
 kernel-optimizer finalize --version 7.3.4
 ```
 
-Edit `kernel-optimizer.toml` before a real build. The defaults use the current kernel config when available and build with the detected logical CPU count.
+Edit `kernel-optimizer.toml` before a real build. Set `source = "linux"` for the latest stable release or `source = "linux-lts"` for the latest longterm release. Both tracks use the same kernel.org signature verification and staging pipeline. The defaults use the current kernel config when available and build with the detected logical CPU count.
 
 ```toml
 source = "linux"
@@ -456,3 +456,22 @@ The build remains staged outside the live boot path. Initramfs generation,
 distribution package creation, module signing, Secure Boot enrollment, bootloader
 entry creation and rollback integration are not yet automated. Keep a known-good
 boot entry and review the staged image before installing it.
+
+
+## Kernel source tracks
+
+The source selector currently enables two verified kernel.org tracks:
+
+- `linux`: resolves the latest `stable` release from `releases.json`.
+- `linux-lts`: resolves the latest `longterm` release from `releases.json`.
+
+Both use the official detached release signature and the pinned kernel.org signer
+allowlist before extraction or compilation. A numeric `version` can be used to pin
+a particular release.
+
+The GUI also lists Linux Zen, CachyOS, Linux TKG and PREEMPT_RT, but keeps them
+disabled until each has an independently reviewed source adapter. Zen requires
+verification of its signed release tags; CachyOS needs signed source plus a pinned
+patch manifest; TKG's upstream build scripts must not be executed implicitly; and
+PREEMPT_RT requires validation of its separate patch signer and exact kernel/RT
+version pairing. These are deliberately not treated as ordinary kernel.org tarballs.
