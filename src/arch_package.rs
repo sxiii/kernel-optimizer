@@ -50,6 +50,7 @@ struct PackageMetadata {
     kernel_image_sha256: String,
     modules_tree_sha256: String,
     config_sha256: String,
+    initramfs_backend: String,
 }
 
 fn valid_release(value: &str) -> bool {
@@ -82,6 +83,16 @@ fn safe_relative_path(value: &str) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
+fn resolve_staged_path(stage_dir: &Path, relative: &str) -> Result<PathBuf> {
+    let relative = safe_relative_path(relative)?;
+    let resolved = fs::canonicalize(stage_dir.join(relative))
+        .context("resolving a path referenced by staged provenance")?;
+    if !resolved.starts_with(stage_dir) {
+        bail!("provenance path resolves outside the staging directory: {}", resolved.display());
+    }
+    Ok(resolved)
+}
+
 fn read_manifest(stage_dir: &Path, release: &str) -> Result<(Manifest, PathBuf, PathBuf)> {
     if !valid_release(release) {
         bail!("invalid kernel release '{release}'");
@@ -111,10 +122,8 @@ fn read_manifest(stage_dir: &Path, release: &str) -> Result<(Manifest, PathBuf, 
         bail!("provenance does not attest staged kernel modules");
     }
 
-    let image_rel = safe_relative_path(&manifest.artifacts.kernel_image)?;
-    let modules_rel = safe_relative_path(&manifest.artifacts.modules_directory)?;
-    let image = stage_dir.join(image_rel);
-    let modules = stage_dir.join(modules_rel);
+    let image = resolve_staged_path(stage_dir, &manifest.artifacts.kernel_image)?;
+    let modules = resolve_staged_path(stage_dir, &manifest.artifacts.modules_directory)?;
     if !image.is_file() || !modules.is_dir() {
         bail!("staged kernel image or module tree referenced by provenance is missing");
     }
@@ -149,7 +158,7 @@ fn validate_artifacts(
         }
     }
 
-    let config = stage_dir.join("boot").join(format!("config-{release}"));
+    let config = resolve_staged_path(stage_dir, &format!("boot/config-{release}"))?;
     if !config.is_file() {
         bail!("staged kernel configuration is missing: {}", config.display());
     }
@@ -167,7 +176,7 @@ fn validate_artifacts(
 
     let system_map = match (&manifest.artifacts.system_map, &manifest.artifacts.system_map_sha256) {
         (Some(relative), Some(expected_hash)) => {
-            let path = stage_dir.join(safe_relative_path(relative)?);
+            let path = resolve_staged_path(stage_dir, relative)?;
             if !path.is_file() || crate::provenance::sha256_file(&path)? != *expected_hash {
                 bail!("staged System.map is missing or does not match provenance");
             }
@@ -231,7 +240,8 @@ fn write_package_sources(
     modules: &Path,
     config: &Path,
     system_map: Option<&Path>,
-    preset: &str,
+    preset: Option<&str>,
+    initramfs_backend: &str,
 ) -> Result<()> {
     let payload = workspace.join("payload");
     let payload_modules = payload.join("modules");
@@ -244,7 +254,9 @@ fn write_package_sources(
     fs::copy(stage_dir.join("provenance.json"), payload.join("provenance.json"))?;
     let metadata_bytes = serde_json::to_vec_pretty(metadata)?;
     fs::write(payload.join("package.json"), metadata_bytes)?;
-    fs::write(payload.join("linux-optimizer.preset"), preset)?;
+    if let Some(preset) = preset {
+        fs::write(payload.join("linux-optimizer.preset"), preset)?;
+    }
 
     let system_map_install = if system_map.is_some() {
         "  install -Dm644 \"$srcdir/payload/System.map\" \"$moddir/System.map\"\n"
@@ -252,6 +264,11 @@ fn write_package_sources(
         ""
     };
 
+    let preset_install = if preset.is_some() {
+        "  install -Dm644 \"$srcdir/payload/linux-optimizer.preset\" \"$pkgdir/etc/mkinitcpio.d/linux-optimizer.preset\"\n"
+    } else {
+        ""
+    };
     let pkgbuild = format!(
         r#"pkgname={PACKAGE_NAME}
 pkgver={version}
@@ -260,7 +277,7 @@ pkgdesc='Custom upstream Linux kernel built and verified by kernel-optimizer'
 arch=('x86_64')
 url='https://github.com/sxiii/kernel-optimizer'
 license=('GPL-2.0-only')
-depends=('kmod' 'mkinitcpio')
+depends=('kmod' '{initramfs_backend}')
 options=('!strip')
 KERNEL_RELEASE='{release}'
 
@@ -273,8 +290,7 @@ package() {{
   install -Dm644 "$srcdir/payload/vmlinuz" "$pkgdir/boot/vmlinuz-linux-optimizer"
   install -Dm644 "$srcdir/payload/config" "$moddir/config"
 {system_map_install}  printf '%s\\n' '{PKGBASE}' > "$moddir/pkgbase"
-  install -Dm644 "$srcdir/payload/linux-optimizer.preset" "$pkgdir/etc/mkinitcpio.d/linux-optimizer.preset"
-  install -Dm644 "$srcdir/payload/provenance.json" "$pkgdir/usr/share/kernel-optimizer/provenance.json"
+{preset_install}  install -Dm644 "$srcdir/payload/provenance.json" "$pkgdir/usr/share/kernel-optimizer/provenance.json"
   install -Dm644 "$srcdir/payload/package.json" "$pkgdir/usr/share/kernel-optimizer/package.json"
 }}
 "#
@@ -297,16 +313,108 @@ fallback_options='-S autodetect'\n\
     )
 }
 
-fn ensure_tool(program: &str) -> Result<()> {
-    let status = Command::new(program)
+fn tool_available(program: &str) -> bool {
+    Command::new(program)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
-    if !matches!(status, Ok(status) if status.success()) {
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn ensure_tool(program: &str) -> Result<()> {
+    if !tool_available(program) {
         bail!("required tool '{program}' is not available");
     }
     Ok(())
+}
+
+fn active_pacman_hook(name: &str) -> Option<PathBuf> {
+    let system = PathBuf::from("/usr/share/libalpm/hooks").join(name);
+    let local = PathBuf::from("/etc/pacman.d/hooks").join(name);
+
+    // A local hook with the same name takes precedence. Respect /dev/null masks.
+    match fs::symlink_metadata(&local) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink()
+                && fs::canonicalize(&local).is_ok_and(|target| target == Path::new("/dev/null"))
+            {
+                None
+            } else if local.is_file() {
+                Some(local)
+            } else {
+                None
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => system.is_file().then_some(system),
+        Err(_) => None,
+    }
+}
+
+fn hook_exec(hook: &Path) -> Option<PathBuf> {
+    let contents = fs::read_to_string(hook).ok()?;
+    contents.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "Exec").then(|| PathBuf::from(value.trim()))
+    })
+}
+
+fn executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && (metadata.permissions().mode() & 0o111) != 0)
+}
+
+fn hook_targets_kernel_image_or_pkgbase(hook: &Path) -> bool {
+    fs::read_to_string(hook).is_ok_and(|contents| {
+        contents.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("Target")
+                && (line.contains("usr/lib/modules/*/vmlinuz")
+                    || line.contains("usr/lib/modules/*/pkgbase"))
+        })
+    })
+}
+
+fn mkinitcpio_hook_exists() -> bool {
+    active_pacman_hook("90-mkinitcpio-install.hook")
+        .and_then(|hook| {
+            let exec = hook_exec(&hook)?;
+            (hook_targets_kernel_image_or_pkgbase(&hook) && executable_file(&exec)).then_some(hook)
+        })
+        .is_some()
+}
+
+fn dracut_hook_exists() -> bool {
+    active_pacman_hook("90-dracut-install.hook")
+        .and_then(|hook| {
+            let exec = hook_exec(&hook)?;
+            (hook_targets_kernel_image_or_pkgbase(&hook) && executable_file(&exec)).then_some(hook)
+        })
+        .is_some()
+}
+fn detect_initramfs_backend() -> Result<&'static str> {
+    let mkinitcpio = tool_available("mkinitcpio") && mkinitcpio_hook_exists();
+    let dracut = tool_available("dracut") && dracut_hook_exists();
+    match (mkinitcpio, dracut) {
+        (true, false) => Ok("mkinitcpio"),
+        (false, true) => Ok("dracut"),
+        (false, false) => bail!(
+            "no supported initramfs integration found; need mkinitcpio with its pacman hook or dracut with its pacman hook"
+        ),
+        (true, true) => bail!(
+            "both mkinitcpio and dracut pacman integrations are active; disable one before building a kernel package to avoid duplicate initramfs generation"
+        ),
+    }
+}
+
+fn validate_initramfs_backend(backend: &str) -> Result<()> {
+    match backend {
+        "mkinitcpio" if tool_available("mkinitcpio") && mkinitcpio_hook_exists() => Ok(()),
+        "dracut" if tool_available("dracut") && dracut_hook_exists() => Ok(()),
+        "mkinitcpio" => bail!("the package expects mkinitcpio, but its executable or pacman hook is missing"),
+        "dracut" => bail!("the package expects dracut, but its executable or pacman hook is missing"),
+        other => bail!("unsupported initramfs backend in package metadata: {other}"),
+    }
 }
 
 pub fn build(
@@ -327,6 +435,7 @@ pub fn build(
     let architecture = arch_name()?;
     ensure_tool("makepkg")?;
     ensure_tool("pacman")?;
+    let initramfs_backend = detect_initramfs_backend()?;
 
     let stage_dir = fs::canonicalize(stage_dir)
         .with_context(|| format!("resolving staging directory {}", stage_dir.display()))?;
@@ -352,6 +461,7 @@ pub fn build(
         kernel_image_sha256: manifest.artifacts.kernel_image_sha256.clone(),
         modules_tree_sha256: manifest.artifacts.modules_tree_sha256.clone().unwrap_or_default(),
         config_sha256: crate::provenance::sha256_file(&config)?,
+        initramfs_backend: initramfs_backend.into(),
     };
     let workspace = output_dir.join(format!(".{PACKAGE_NAME}-build-{}-{}", release, std::process::id()));
     if workspace.exists() {
@@ -360,7 +470,11 @@ pub fn build(
     }
     fs::create_dir_all(&workspace)?;
 
-    let preset = make_preset(release);
+    let preset = if initramfs_backend == "mkinitcpio" {
+        Some(make_preset(release))
+    } else {
+        None
+    };
     let build_result = (|| -> Result<PathBuf> {
         write_package_sources(
             &workspace,
@@ -372,7 +486,8 @@ pub fn build(
             &modules,
             &config,
             system_map.as_deref(),
-            &preset,
+            preset.as_deref(),
+            initramfs_backend,
         )?;
 
         let listed = Command::new("makepkg")
@@ -446,6 +561,11 @@ fn run_text(program: &str, args: &[&str]) -> Result<String> {
 }
 
 fn ensure_boot_mount_ready() -> Result<()> {
+    if Path::new("/efi/loader/loader.conf").is_file()
+        && !Path::new("/boot/loader/loader.conf").is_file()
+    {
+        bail!("systemd-boot is using /efi as its ESP; this package adapter installs files under /boot and does not manage /efi entries");
+    }
     let configured = run_text(
         "findmnt",
         &["--fstab", "--noheadings", "--output", "TARGET", "--target", "/boot"],
@@ -469,10 +589,25 @@ fn ensure_boot_mount_ready() -> Result<()> {
 fn secure_boot_is_enabled() -> Result<bool> {
     let output = match Command::new("mokutil").arg("--sb-state").output() {
         Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).to_lowercase(),
+        Ok(_) if Path::new("/sys/firmware/efi/efivars").is_dir() => {
+            bail!("mokutil could not determine Secure Boot state; install or repair mokutil and retry")
+        }
         Ok(_) => return Ok(false),
+        Err(_) if Path::new("/sys/firmware/efi/efivars").is_dir() => {
+            bail!("mokutil is required to check Secure Boot on this UEFI system; install mokutil and retry")
+        }
         Err(_) => return Ok(false),
     };
-    Ok(output.contains("secureboot enabled") || output.contains("secure boot enabled"))
+    if output.contains("secureboot enabled") || output.contains("secure boot enabled") {
+        return Ok(true);
+    }
+    if output.contains("secureboot disabled") || output.contains("secure boot disabled") {
+        return Ok(false);
+    }
+    if Path::new("/sys/firmware/efi/efivars").is_dir() {
+        bail!("could not determine Secure Boot state from mokutil; install mokutil and retry");
+    }
+    Ok(false)
 }
 
 pub fn install(package_path: &Path, yes: bool) -> Result<()> {
@@ -486,10 +621,6 @@ pub fn install(package_path: &Path, yes: bool) -> Result<()> {
         bail!("package file does not exist: {}", package_path.display());
     }
     ensure_tool("pacman")?;
-    ensure_tool("mkinitcpio")?;
-    if !Path::new("/usr/share/libalpm/hooks/90-mkinitcpio-install.hook").is_file() {
-        bail!("the mkinitcpio pacman install hook is missing; automatic initramfs generation cannot be verified");
-    }
     if secure_boot_is_enabled()? {
         bail!("Secure Boot is enabled; kernel/module signing is not implemented by this installer");
     }
@@ -532,6 +663,7 @@ pub fn install(package_path: &Path, yes: bool) -> Result<()> {
     {
         bail!("package metadata failed validation; refusing installation");
     }
+    validate_initramfs_backend(&metadata.initramfs_backend)?;
 
     let installed = Command::new("pacman")
         .args(["-Q", PACKAGE_NAME])
@@ -547,15 +679,25 @@ pub fn install(package_path: &Path, yes: bool) -> Result<()> {
         );
     }
     let preset = Path::new("/etc/mkinitcpio.d/linux-optimizer.preset");
-    if preset.exists() && !installed {
+    if metadata.initramfs_backend == "mkinitcpio" && preset.exists() && !installed {
         bail!(
             "{} already exists; move or back it up explicitly before installing",
             preset.display()
         );
     }
+    let boot_image = Path::new("/boot/vmlinuz-linux-optimizer");
+    if boot_image.exists() && !installed {
+        bail!(
+            "{} already exists but the linux-optimizer package is not installed; refusing to overwrite it",
+            boot_image.display()
+        );
+    }
 
     println!("Installing {PACKAGE_NAME} kernel release {} using pacman.", metadata.kernel_release);
-    println!("Pacman will run the mkinitcpio hook to generate initramfs images.");
+    println!(
+        "Pacman will run the {} hook to generate initramfs images.",
+        metadata.initramfs_backend
+    );
     println!("No GRUB, systemd-boot, EFI or Secure Boot settings will be changed.");
     let status = Command::new("pacman")
         .args(["-U", "--noconfirm"])
@@ -589,6 +731,33 @@ mod tests {
         assert!(safe_relative_path("boot/vmlinuz-7.3.4").is_ok());
         assert!(safe_relative_path("../etc/shadow").is_err());
         assert!(safe_relative_path("/boot/vmlinuz").is_err());
+    }
+
+    #[test]
+    fn hook_target_match_requires_kernel_vmlinuz_or_pkgbase() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-hook-target-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let hook = root.join("90-dracut-install.hook");
+        fs::write(
+            &hook,
+            "[Trigger]\nType = Path\nTarget = usr/lib/modules/*/vmlinuz\n[Action]\nExec = /usr/bin/dracut\nNeedsTargets\n",
+        )
+        .unwrap();
+        assert!(hook_targets_kernel_image_or_pkgbase(&hook));
+        fs::write(
+            &hook,
+            "[Trigger]\nType = Path\nTarget = usr/share/something\n[Action]\nExec = /usr/bin/dracut\n",
+        )
+        .unwrap();
+        assert!(!hook_targets_kernel_image_or_pkgbase(&hook));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

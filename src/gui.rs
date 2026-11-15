@@ -1389,10 +1389,10 @@ impl KernelOptimizerApp {
         Self::card(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("SUPPORTED").color(Color32::from_rgb(125, 208, 161)).strong());
-                ui.heading("Arch Linux and Garuda - x86_64");
+                ui.heading("Arch Linux, Garuda and Arch-derived systems - x86_64");
             });
-            ui.label("Uses makepkg to create a normal pacman package. Pacman then installs the kernel image, modules, config and provenance, and the mkinitcpio hook generates the initramfs.");
-            ui.label(RichText::new("Requirements: makepkg, pacman, mkinitcpio and its 90-mkinitcpio-install hook. Build as your normal user; installation uses PolicyKit.").color(Color32::from_rgb(145, 164, 185)));
+            ui.label("Uses makepkg to create a normal pacman package. The package includes the kernel image under /usr/lib/modules/<release>/vmlinuz and pkgbase so the detected pacman hook can generate initramfs images.");
+            ui.label(RichText::new("The package builder detects either mkinitcpio with its active pacman hook or dracut with its active pacman hook (including Garuda's dracut hook). It refuses ambiguous, masked or incomplete hook setups. Build as your normal user; installation uses PolicyKit.").color(Color32::from_rgb(145, 164, 185)));
         });
 
         ui.add_space(8.0);
@@ -1471,7 +1471,7 @@ impl KernelOptimizerApp {
         ui.add_space(8.0);
         Self::card(ui, |ui| {
             ui.heading("Important boot notes");
-            ui.label("The package installs /boot/vmlinuz-linux-optimizer and creates default and fallback initramfs images through mkinitcpio.");
+            ui.label("The package installs /boot/vmlinuz-linux-optimizer. The selected pacman hook generates initramfs images using the host's active initramfs backend; mkinitcpio also receives a dedicated default/fallback preset.");
             ui.label(RichText::new("It does NOT edit GRUB, systemd-boot, EFI entries or Secure Boot keys. After installation, inspect /boot and add a bootloader entry manually. Keep your known-good kernel entry until you have successfully booted the new one.").color(Color32::from_rgb(235, 191, 104)));
             ui.label("The installer refuses forced module-signature configurations, enabled Secure Boot, an unmounted separate /boot filesystem and an existing unowned module directory.");
         });
@@ -1483,7 +1483,7 @@ impl KernelOptimizerApp {
                 .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
                 .show(ui.ctx(), |ui| {
                     ui.label(format!("Install this package with pacman?\n{}", self.package_path));
-                    ui.label("This modifies /boot and /usr/lib/modules and runs the mkinitcpio pacman hook.");
+                    ui.label("This modifies /boot and /usr/lib/modules and runs the detected initramfs pacman hook.");
                     ui.label("No bootloader configuration will be changed.");
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
