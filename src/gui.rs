@@ -27,6 +27,7 @@ stage_dir = "/var/tmp/kernel-optimizer/stage"
 enable_lto = false
 enable_bpf = true
 menuconfig = false
+allow_unverified_sources = false
 "#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -388,6 +389,21 @@ impl KernelOptimizerApp {
         self.profile_text = toml::to_string_pretty(&value)?;
         self.profile_dirty = true;
         self.log(format!("Selected kernel source: {source}"));
+        Ok(())
+    }
+
+    fn set_profile_allow_unverified(&mut self, allowed: bool) -> Result<()> {
+        let mut value: toml::Value = toml::from_str(&self.profile_text)
+            .context("profile text is not valid TOML")?;
+        let table = value.as_table_mut().context("profile root must be a TOML table")?;
+        table.insert("allow_unverified_sources".into(), toml::Value::Boolean(allowed));
+        self.profile_text = toml::to_string_pretty(&value)?;
+        self.profile_dirty = true;
+        self.log(if allowed {
+            "Explicit unverified-source opt-in enabled"
+        } else {
+            "Unverified-source opt-in disabled"
+        });
         Ok(())
     }
 
@@ -918,14 +934,14 @@ impl KernelOptimizerApp {
         ui.add_space(8.0);
         if self.sources_text.trim().is_empty() {
             self.sources_text = String::from(
-                "SOURCE            STATUS       TRACK / PURPOSE\nlinux             SUPPORTED    Latest stable kernel.org release\nlinux-lts          SUPPORTED    Latest longterm kernel.org release\nlinux-zen          PLANNED      Signed Zen source adapter pending\nlinux-cachyos      PLANNED      Signed CachyOS source and patch manifest pending\nlinux-tkg          PLANNED      Audited patch adapter pending (no scripts executed)\nlinux-rt           PLANNED      PREEMPT_RT patch signer/version adapter pending\n\nOnly supported tracks can be built. Planned tracks remain visible but fail closed until source provenance is verified.",
+                "SOURCE            STATUS       TRACK / PURPOSE\nlinux             SUPPORTED    Latest signed kernel.org stable\nlinux-lts          SUPPORTED    Latest signed kernel.org longterm\nlinux-zen          SUPPORTED    Signed Zen patch on signed kernel.org base\nlinux-rt           SUPPORTED    Signed PREEMPT_RT patch on signed kernel.org base\nlinux-cachyos      OPT-IN       GitHub SHA-256 checked source archive; signature not verified\nlinux-tkg          OPT-IN       Pinned EEVDF patch subset; patches are unsigned\n\nCachyOS and TKG require explicit allow_unverified_sources opt-in and cannot be packaged.",
             );
         }
         Self::card(ui, |ui| {
             ui.label(RichText::new(&self.sources_text).monospace());
         });
         ui.add_space(8.0);
-        ui.label(RichText::new("Linux stable and Linux LTS are buildable now. Zen, CachyOS, TKG and PREEMPT_RT remain visible but disabled until their independent source signatures, patch manifests and version mappings are implemented.").color(Color32::from_rgb(235, 191, 104)));
+        ui.label(RichText::new("Zen and PREEMPT_RT use pinned detached-signature verification. CachyOS and TKG are opt-in because their current source material is not covered by a trusted detached signature; they remain ineligible for verified Arch packaging.").color(Color32::from_rgb(235, 191, 104)));
     }
 
     fn profile_page(&mut self, ui: &mut egui::Ui) {
@@ -1006,19 +1022,19 @@ impl KernelOptimizerApp {
             egui::ComboBox::from_label("Kernel source")
                 .selected_text(match configured_source.as_str() {
                     "linux-lts" => "Linux LTS (kernel.org longterm)",
-                    "linux-zen" => "Linux Zen (not yet supported)",
-                    "linux-cachyos" => "CachyOS (not yet supported)",
-                    "linux-tkg" => "Linux TKG (not yet supported)",
-                    "linux-rt" => "PREEMPT_RT (not yet supported)",
+                    "linux-zen" => "Linux Zen (signed patch)",
+                    "linux-cachyos" => "CachyOS (opt-in source archive)",
+                    "linux-tkg" => "Linux TKG (opt-in EEVDF patch profile)",
+                    "linux-rt" => "PREEMPT_RT (signed RT patch)",
                     _ => "Linux stable (kernel.org)",
                 })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut selected_source, "linux".into(), "Linux stable - signed kernel.org release");
                     ui.selectable_value(&mut selected_source, "linux-lts".into(), "Linux LTS - signed kernel.org longterm release");
-                    ui.add_enabled_ui(false, |ui| { ui.label("Linux Zen - source adapter pending"); });
-                    ui.add_enabled_ui(false, |ui| { ui.label("CachyOS - source adapter pending"); });
-                    ui.add_enabled_ui(false, |ui| { ui.label("Linux TKG - source adapter pending"); });
-                    ui.add_enabled_ui(false, |ui| { ui.label("PREEMPT_RT - source adapter pending"); });
+                    ui.selectable_value(&mut selected_source, "linux-zen".into(), "Linux Zen - signed Zen patch + stable base");
+                    ui.selectable_value(&mut selected_source, "linux-cachyos".into(), "CachyOS - release source archive (explicit opt-in)");
+                    ui.selectable_value(&mut selected_source, "linux-tkg".into(), "Linux TKG - pinned curated EEVDF patches (explicit opt-in)");
+                    ui.selectable_value(&mut selected_source, "linux-rt".into(), "PREEMPT_RT - signed RT patch + exact base version");
                 });
             if selected_source != configured_source
                 && let Err(error) = self.set_profile_source(&selected_source)
@@ -1026,10 +1042,24 @@ impl KernelOptimizerApp {
                 self.log(format!("Could not change kernel source: {error:#}"));
             }
         });
-        if configured_source == "linux-lts" {
+        if matches!(configured_source.as_str(), "linux-cachyos" | "linux-tkg") {
+            let mut allow_unverified = toml::from_str::<toml::Value>(&self.profile_text)
+                .ok().and_then(|value| value.get("allow_unverified_sources").and_then(toml::Value::as_bool))
+                .unwrap_or(false);
+            if ui.checkbox(&mut allow_unverified, "Allow source builds without a trusted detached signature (not packageable)").changed()
+                && let Err(error) = self.set_profile_allow_unverified(allow_unverified)
+            {
+                self.log(format!("Could not update source trust opt-in: {error:#}"));
+            }
+            if !allow_unverified {
+                ui.label(RichText::new("Enable the explicit opt-in to build this source. The resulting provenance is marked unverified.").color(Color32::from_rgb(235, 191, 104)));
+            }
+        } else if configured_source == "linux-lts" {
             ui.label(RichText::new("LTS builds automatically resolve the latest longterm release from kernel.org.").color(Color32::from_rgb(125, 208, 161)));
-        } else if !matches!(configured_source.as_str(), "linux") {
-            ui.label(RichText::new("This source does not yet have an audited downloader/patch adapter and cannot be built.").color(Color32::from_rgb(235, 191, 104)));
+        } else if configured_source == "linux-zen" {
+            ui.label(RichText::new("Zen patch compatibility is resolved from the upstream release notes; both the base archive and patch signature are verified.").color(Color32::from_rgb(125, 208, 161)));
+        } else if configured_source == "linux-rt" {
+            ui.label(RichText::new("PREEMPT_RT uses the exact X.Y upstream base version for the latest signed RT patch in that series.").color(Color32::from_rgb(125, 208, 161)));
         }
 
         ui.add_space(8.0);
