@@ -39,7 +39,7 @@ bootable system by itself.
 Rust stable, a C toolchain, make, curl, xz, tar, GnuPG 2.4 or later, bc, bison, flex, OpenSSL development headers, elfutils, pahole, perl, python and the usual kernel build dependencies. On Arch/Garuda, start with:
 
 ```sh
-sudo pacman -S --needed base-devel rust curl xz zstd gzip patch tar gnupg bc bison flex openssl elfutils pahole perl python ccache
+sudo pacman -S --needed base-devel rust git curl xz zstd gzip patch tar gnupg bc bison flex openssl elfutils pahole perl python ccache
 ```
 
 Optional tools such as `lspci`, `lsblk`, `zcat` and `menuconfig` enhance inspection/configuration.
