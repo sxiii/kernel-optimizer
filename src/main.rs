@@ -706,10 +706,10 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
         }
     }
     let archive_sha256_before=provenance::sha256_file(&archive)?;
-    let signature_sha256_before=signature.as_deref().map(provenance::sha256_file).transpose()?;
     if let (Some(signature_path), Some(signature_url)) = (signature.as_deref(), signature_url.as_deref()) {
         download_signature(signature_path, signature_url)?;
     }
+    let signature_sha256_before=signature.as_deref().map(provenance::sha256_file).transpose()?;
     let base_signature_verification = if let Some(signature_path) = signature.as_deref() {
         Some(provenance::verify_kernel_archive(&archive,signature_path,p.gpg_home.as_deref())?)
     } else {
