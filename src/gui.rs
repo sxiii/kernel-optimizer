@@ -165,7 +165,7 @@ impl KernelOptimizerApp {
         visuals.widgets.hovered.bg_fill = Color32::from_rgb(43, 61, 82);
         visuals.widgets.active.bg_fill = Color32::from_rgb(35, 123, 156);
         cc.egui_ctx.set_visuals(visuals);
-        cc.egui_ctx.style_mut(|style| {
+        cc.egui_ctx.global_style_mut(|style| {
             style.spacing.item_spacing = Vec2::new(10.0, 9.0);
             style.visuals.window_corner_radius = egui::CornerRadius::same(12);
             style.visuals.menu_corner_radius = egui::CornerRadius::same(10);
@@ -309,22 +309,23 @@ impl KernelOptimizerApp {
 
     fn poll_runner(&mut self, ctx: &egui::Context) {
         let mut finished = None;
+        let mut messages = Vec::new();
         if let Some(receiver) = self.receiver.as_ref() {
             while let Ok(message) = receiver.try_recv() {
-                match message {
-                    RunnerMessage::Line { stderr, text } => {
-                        if !stderr {
-                            self.output_capture.push_str(&text);
-                            self.output_capture.push('\n');
-                        }
-                        self.log(if stderr {
-                            format!("stderr: {text}")
-                        } else {
-                            text
-                        });
+                messages.push(message);
+            }
+        }
+
+        for message in messages {
+            match message {
+                RunnerMessage::Line { stderr, text } => {
+                    if !stderr {
+                        self.output_capture.push_str(&text);
+                        self.output_capture.push('\n');
                     }
-                    RunnerMessage::Finished(code) => finished = Some(code),
+                    self.log(if stderr { format!("stderr: {text}") } else { text });
                 }
+                RunnerMessage::Finished(code) => finished = Some(code),
             }
         }
 
@@ -347,9 +348,7 @@ impl KernelOptimizerApp {
                     OutputTarget::Recommendations => {
                         match serde_json::from_str(&self.output_capture) {
                             Ok(report) => self.recommendations = Some(report),
-                            Err(error) => {
-                                self.log(format!("Could not parse recommendation JSON: {error}"))
-                            }
+                            Err(error) => self.log(format!("Could not parse recommendation JSON: {error}")),
                         }
                     }
                     OutputTarget::Sources => self.sources_text = self.output_capture.clone(),
@@ -1452,12 +1451,12 @@ impl KernelOptimizerApp {
         self.log("No terminal emulator found. Install x-terminal-emulator or run the command from a terminal.");
     }
 
-    fn draw_sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("navigation")
+    fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("navigation")
             .resizable(false)
-            .exact_width(218.0)
+            .exact_size(218.0)
             .frame(egui::Frame::new().fill(Color32::from_rgb(12, 17, 27)).inner_margin(12.0))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.add_space(7.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("◈").size(25.0).color(Color32::from_rgb(93, 204, 224)).strong());
@@ -1503,9 +1502,9 @@ impl eframe::App for KernelOptimizerApp {
         let ctx = ui.ctx().clone();
         self.poll_runner(&ctx);
 
-        egui::TopBottomPanel::top("topbar")
+        egui::Panel::top("topbar")
             .frame(egui::Frame::new().fill(Color32::from_rgb(17, 24, 37)).inner_margin(egui::Margin::symmetric(16, 10)))
-            .show(&ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(self.page.title()).size(14.0).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1521,11 +1520,11 @@ impl eframe::App for KernelOptimizerApp {
                 });
             });
 
-        self.draw_sidebar(&ctx);
+        self.draw_sidebar(ui);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::from_rgb(15, 20, 31)).inner_margin(egui::Margin::same(18)))
-            .show(&ctx, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     match self.page {
                         Page::Overview => self.overview_page(ui),
