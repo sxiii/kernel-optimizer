@@ -354,7 +354,7 @@ pub fn verify_archive_digest(path: &Path, expected: Option<&str>) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
 
     fn temp_patch(contents: &str) -> PathBuf {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -365,14 +365,14 @@ mod tests {
 
     #[test]
     fn patch_path_validation_rejects_parent_traversal() {
-        let path = temp_patch("--- a/../../outside\\n+++ b/../../outside\\n@@ -1 +1 @@\\n-old\\n+new\\n");
+        let path = temp_patch("--- a/../../outside\n+++ b/../../outside\n@@ -1 +1 @@\n-old\n+new\n");
         assert!(validate_patch_paths(&path).is_err());
         fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn patch_path_validation_allows_normal_paths_and_dev_null() {
-        let path = temp_patch("--- /dev/null\\n+++ b/drivers/example.c\\n@@ -0,0 +1 @@\\n+example\\n");
+        let path = temp_patch("--- /dev/null\n+++ b/drivers/example.c\n@@ -0,0 +1 @@\n+example\n");
         assert!(validate_patch_paths(&path).is_ok());
         fs::remove_file(path).unwrap();
     }
