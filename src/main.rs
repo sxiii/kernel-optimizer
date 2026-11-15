@@ -943,7 +943,7 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
         modules_total_bytes,
     };
     let manifest=BuildManifest {
-        schema_version:2,
+        schema_version:3,
         generated_unix:completed_unix,
         application_version:env!("CARGO_PKG_VERSION"),
         source:source_manifest,
@@ -953,8 +953,8 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     };
     provenance::write_json_atomic(&p.stage_dir.join("provenance.json"),&manifest)?;
     let metadata = format!(
-        "version={}\nlocalversion={}\nkernel_release={}\nsource={}\nsource_signature_verified=true\nsource_signer={}\nsource_signer_fingerprint={}\nsource_archive_sha256={}\nsource_signature_sha256={}\neffective_config_sha256={}\nkernel_image={}\nkernel_image_sha256={}\nmodules_staged={}\nprovenance=provenance.json\n",
-        p.version, p.local_version, release, p.source,
+        "version={}\nlocalversion={}\nkernel_release={}\nsource={}\nsource_signature_verified={}\nsource_signer={}\nsource_signer_fingerprint={}\nsource_archive_sha256={}\nsource_signature_sha256={}\neffective_config_sha256={}\nkernel_image={}\nkernel_image_sha256={}\nmodules_staged={}\nprovenance=provenance.json\n",
+        p.version, p.local_version, release, p.source, manifest.source.signature_verified,
         manifest.source.signer_name,manifest.source.signer_primary_fingerprint,
         manifest.source.archive_sha256,manifest.source.signature_sha256,
         effective_config_sha256,image_name,image_sha256,modules_staged
@@ -1022,6 +1022,9 @@ fn finalize(profile_path: &Path, version_override: Option<&str>) -> Result<()> {
             .with_context(|| format!("reading build profile {}", profile_path.display()))?
     )?;
     validate_profile(&p)?;
+    if !matches!(p.source.as_str(), "linux" | "linux-lts") {
+        bail!("metadata recovery currently supports only Linux stable/LTS. Variant sources require re-verifying their exact patch assets; rebuild the selected variant to recreate complete provenance.");
+    }
 
     let version = infer_finalize_version(&p, version_override)?;
     p.version = version.clone();
@@ -1159,6 +1162,7 @@ fn finalize(profile_path: &Path, version_override: Option<&str>) -> Result<()> {
         signature_url,
         signature_sha256,
         signature_verified: true,
+        patches: Vec::new(),
         signature_verification_method: "re-verified during metadata recovery: xz --decompress --stdout piped to gpg --no-options --batch --no-auto-key-import --no-auto-key-retrieve --no-auto-key-locate --status-fd=1 --verify".into(),
         trust_reference: "https://www.kernel.org/signature.html".into(),
         signature_creation_date: signature_verification.signature_creation_date,
@@ -1232,7 +1236,7 @@ fn finalize(profile_path: &Path, version_override: Option<&str>) -> Result<()> {
     };
 
     let manifest = BuildManifest {
-        schema_version: 2,
+        schema_version: 3,
         generated_unix,
         application_version: env!("CARGO_PKG_VERSION"),
         source: source_manifest,
@@ -1379,6 +1383,12 @@ mod tests {
             source: "linux-zen".into(),
             ..Profile::default()
         };
+        assert!(validate_profile(&profile).is_ok());
+        assert_eq!(release_moniker("linux-zen").unwrap(), "stable");
+        assert_eq!(release_moniker("linux-rt").unwrap(), "stable");
+        assert_eq!(release_moniker("linux-cachyos").unwrap(), "stable");
+        assert_eq!(release_moniker("linux-tkg").unwrap(), "stable");
+        let profile = Profile { source: "unknown".into(), ..Profile::default() };
         assert!(validate_profile(&profile).is_err());
     }
 
