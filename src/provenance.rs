@@ -269,6 +269,28 @@ pub fn verify_detached_file(
     ).context("patch signature did not match its pinned signer fingerprint")
 }
 
+pub fn fingerprint_available(gpg_home: Option<&Path>, expected: &str) -> Result<bool> {
+    let mut command = Command::new("gpg");
+    command.args(["--no-options", "--batch"]);
+    if let Some(home) = gpg_home {
+        if !home.is_dir() {
+            bail!("configured GPG home is not a directory: {}", home.display());
+        }
+        command.arg("--homedir").arg(home);
+    }
+    command.args(["--with-colons", "--fingerprint", "--list-keys"]);
+    let output = command.output().context("listing keys in the configured GnuPG keyring")?;
+    if !output.status.success() {
+        bail!("GnuPG could not list the configured keyring: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    let expected = normalized_fingerprint(expected);
+    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        let fields = line.split(':').collect::<Vec<_>>();
+        fields.first() == Some(&"fpr")
+            && fields.get(9).is_some_and(|fingerprint| normalized_fingerprint(fingerprint) == expected)
+    }))
+}
+
 pub fn trusted_key_available(gpg_home: Option<&Path>) -> Result<Option<String>> {
     let mut command = Command::new("gpg");
     command.args(["--no-options", "--batch"]);
