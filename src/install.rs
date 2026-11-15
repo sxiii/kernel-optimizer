@@ -274,7 +274,8 @@ fn validate_stage(stage: &Path) -> Result<ValidatedStage> {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || byte == b'.')
         })
-        .context("provenance contains an invalid upstream kernel version")?;
+        .context("provenance contains an invalid upstream kernel version")?
+        .to_owned();
     if !(2..=3).contains(&pkgver.split('.').count())
         || pkgver.split('.').any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
     {
@@ -570,8 +571,8 @@ fn inspect_validated_stage(validated: &ValidatedStage) -> Result<InstallReadines
             "Legacy BIOS or EFI variables unavailable".into()
         },
         current_kernel,
-        kernel_release: validated.release,
-        package_name: validated.package_name,
+        kernel_release: validated.release.clone(),
+        package_name: validated.package_name.clone(),
         kernel_image_size_bytes: validated.kernel_image_size_bytes,
         modules_file_count: validated.modules_file_count,
         modules_total_bytes: validated.modules_total_bytes,
