@@ -36,7 +36,7 @@ bootable system by itself.
 
 ## Requirements
 
-Rust stable, a C toolchain, make, curl, xz, tar, GnuPG 2.4 or later, bc, bison, flex, OpenSSL development headers, elfutils, pahole, perl, python and the usual kernel build dependencies. On Arch/Garuda, start with:
+Rust stable, a C toolchain, make, curl, xz, tar, GnuPG 2.4 or later, bc, bison, flex, OpenSSL development headers, elfutils, pahole, perl, python and the usual kernel build dependencies. Zen additionally needs zstd and patch; PREEMPT_RT needs patch; CachyOS needs gzip; TKG needs git and patch. On Arch/Garuda, start with:
 
 ```sh
 sudo pacman -S --needed base-devel rust git curl xz zstd gzip patch tar gnupg bc bison flex openssl elfutils pahole perl python ccache
@@ -79,7 +79,7 @@ The build profile accepts these additional source values:
 | \`linux-zen\` | Downloads the kernel.org stable archive, then applies the current Zen release patch matching that exact base version. | Verifies the kernel.org tarball and the detached signature on the Zen patch. Eligible for verified packaging when the build artifacts pass the normal checks. |
 | \`linux-rt\` | Downloads the exact upstream X.Y base release and applies the latest PREEMPT_RT patch advertised for that kernel.org series. | Verifies the kernel.org tarball and the RT patch signature. RT builds are pinned to X.Y, not a later X.Y.Z stable point release. |
 | \`linux-cachyos\` | Downloads the full source archive from the latest CachyOS Linux GitHub release. | Requires \`allow_unverified_sources = true\`; checks the SHA-256 digest published in GitHub release metadata, but does not claim a trusted detached signature. Not eligible for verified Arch packaging. |
-| \`linux-tkg\` | Starts with a signed kernel.org stable archive and applies only the pinned TKG \`glitched-base\` and EEVDF additions patches for the matching release tag. No TKG shell installer or PKGBUILD is executed. | Requires \`allow_unverified_sources = true\`; the patchset is pinned to a Git commit but is not independently signed. Not eligible for verified Arch packaging. |
+| \`linux-tkg\` | Starts with a signed kernel.org stable archive and applies only the pinned TKG \`glitched-base\` and EEVDF additions patches for the matching release tag. No TKG shell installer or PKGBUILD is executed. | Requires \`allow_unverified_sources = true\`; the patchset is pinned to a Git commit and checked against its Git blob IDs, but is not independently signed. Not eligible for verified Arch packaging. |
 
 CachyOS and TKG are deliberately opt-in because their current source artifacts do
 not meet the project's detached-signature trust policy. Add this to a profile only
