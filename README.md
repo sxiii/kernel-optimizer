@@ -220,7 +220,7 @@ kernel-optimizer arch-package --profile kernel-optimizer.toml \
 
 # Install the generated package as a separate, explicit administrator action.
 sudo kernel-optimizer install \
-  --package /var/tmp/kernel-optimizer/packages/linux-optimizer-7.3.4-1-x86_64.pkg.tar.zst \
+  --package /var/tmp/kernel-optimizer/packages/linux-optimizer-7-3-4-ko-7.3.4-1-x86_64.pkg.tar.zst \
   --yes
 ```
 
@@ -228,7 +228,7 @@ Package creation runs as the ordinary build user with `makepkg`. It rechecks the
 provenance schema, staged kernel image SHA-256, staged config hash, staged modules
 tree hash, module indexes and optional System.map before packaging. It copies the
 verified kernel image, module tree, config, provenance and package metadata into a
-normal pacman package. Build workspaces are retained on failure for inspection.
+normal pacman package. The package name and boot/initramfs filenames are unique per kernel release, so multiple custom kernels can be installed side by side for rollback. Build workspaces are retained on failure for inspection.
 The output directory needs enough free space for another copy of the staged modules
 tree and the compressed package.
 
@@ -250,7 +250,7 @@ mount state, existing module directories and boot-image/preset file conflicts be
 calling `pacman -U`. Secure Boot enabled or indeterminate on UEFI is a hard stop.
 
 **Bootloader entries are not created or edited.** The package installs
-`/boot/vmlinuz-linux-optimizer` and allows the active initramfs pacman hook to
+`/boot/vmlinuz-linux-optimizer-<release>` and allows the active initramfs pacman hook to
 generate initramfs images. After installation, inspect the files in /boot and add
 a bootloader entry using your distribution's supported tools. Keep the current,
 known-good kernel entry until the new kernel has booted successfully. systemd-boot

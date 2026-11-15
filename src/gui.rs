@@ -1475,7 +1475,7 @@ impl KernelOptimizerApp {
         ui.add_space(8.0);
         Self::card(ui, |ui| {
             ui.heading("Important boot notes");
-            ui.label("The package installs /boot/vmlinuz-linux-optimizer. The selected pacman hook generates initramfs images using the host's active initramfs backend; mkinitcpio also receives a dedicated default/fallback preset.");
+            ui.label("Each kernel release gets its own package name and /boot/vmlinuz-linux-optimizer-<release> image, so multiple custom kernels can coexist for rollback. The selected pacman hook generates initramfs images using the host's active backend; mkinitcpio also receives a dedicated default/fallback preset.");
             ui.label(RichText::new("It does NOT edit GRUB, systemd-boot, EFI entries or Secure Boot keys. After installation, inspect /boot and add a bootloader entry manually. Keep your known-good kernel entry until you have successfully booted the new one.").color(Color32::from_rgb(235, 191, 104)));
             ui.label("The installer refuses forced module-signature configurations, enabled Secure Boot, an unmounted separate /boot filesystem and an existing unowned module directory.");
         });
