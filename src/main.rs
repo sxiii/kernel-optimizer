@@ -402,7 +402,19 @@ fn doctor(profile_path: &Path) -> Result<()> {
     println!("Kernel build preflight (read-only)\nProfile: {}", if profile_loaded { profile_path.display().to_string() } else { "built-in defaults".into() });
     let mut failures = 0usize;
     let mut warnings = 0usize;
-    let required = ["make", "curl", "xz", "tar", "gpg", "bc", "bison", "flex", "perl", "python3"];
+    let mut required = vec!["make", "curl", "xz", "tar", "gpg", "bc", "bison", "flex", "perl", "python3"];
+    if matches!(p.source.as_str(), "linux-zen" | "linux-tkg") {
+        required.push("patch");
+    }
+    if matches!(p.source.as_str(), "linux-zen") {
+        required.push("zstd");
+    }
+    if matches!(p.source.as_str(), "linux-cachyos") {
+        required.push("gzip");
+    }
+    if matches!(p.source.as_str(), "linux-rt") {
+        required.push("patch");
+    }
     for tool in required {
         if command_available(tool) { println!("[ ok ] {tool} available"); }
         else { println!("[FAIL] {tool} not found in PATH"); failures += 1; }
@@ -818,10 +830,6 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     let make_version=provenance::command_version("make",&["--version"]);
     let compiler_version=provenance::command_version(&p.compiler,&["--version"]);
     let ccache_version=if p.ccache { provenance::command_version("ccache",&["--version"]) } else { None };
-    let gpg_version=provenance::command_version("gpg",&["--version"]);
-    let xz_version=provenance::command_version("xz",&["--version"]);
-    let curl_version=provenance::command_version("curl",&["--version"]);
-    let tar_version=provenance::command_version("tar",&["--version"]);
     let rustc_version=provenance::command_version("rustc",&["--version"]);
     run_checked(&mut make)?;
     fs::create_dir_all(&p.stage_dir)?;
