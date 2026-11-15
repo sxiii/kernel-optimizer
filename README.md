@@ -97,6 +97,17 @@ pinned TKG source revision. An unverified source remains non-packageable: the
 Arch package adapter continues to reject it rather than silently converting a
 GitHub digest or an unsigned patch into a trusted signature.
 
+For Zen and PREEMPT_RT, the builder can bootstrap a missing patch-signing public key
+on first use. It queries keys.openpgp.org by the full pinned fingerprint, then
+keyserver.ubuntu.com as a fallback. GnuPG inspects the downloaded key and the
+builder imports it only when its **primary fingerprint exactly matches** the
+compiled-in value below. The detached signature is still verified locally
+after import; a keyserver response is never trusted merely because it was downloaded.
+
+The Activity page now offers **Copy all** and **Save log...**, and individual log
+lines can be selected. Curl progress meters are suppressed so the activity log
+contains actual diagnostics rather than repeated transfer-meter rows.
+
 The Zen and PREEMPT_RT patch signers have separate pinned primary fingerprints:
 
 | Patch source | Signer | Pinned primary fingerprint |
