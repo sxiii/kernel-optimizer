@@ -138,10 +138,10 @@ fn validate_module_symlinks(modules: &Path) -> Result<()> {
             let path = entry.path();
             let file_type = fs::symlink_metadata(&path)?.file_type();
             let relative = path.strip_prefix(modules)?;
-            if relative == Path::new("build") || relative == Path::new("source") {
-                if !file_type.is_symlink() {
-                    bail!("staged modules build/source entry must be a symlink: {}", path.display());
-                }
+            if (relative == Path::new("build") || relative == Path::new("source"))
+                && !file_type.is_symlink()
+            {
+                bail!("staged modules build/source entry must be a symlink: {}", path.display());
             }
             if file_type.is_dir() {
                 pending.push(path);
