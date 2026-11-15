@@ -367,11 +367,11 @@ impl KernelOptimizerApp {
                         Err(error) => self.log(format!("Benchmark completed, but its JSON could not be loaded: {error:#}")),
                     }
                 }
-                if self.page == Page::Profile {
-                    if let Ok(contents) = fs::read_to_string(&self.profile_path) {
-                        self.profile_text = contents;
-                        self.profile_dirty = false;
-                    }
+                if self.page == Page::Profile
+                    && let Ok(contents) = fs::read_to_string(&self.profile_path)
+                {
+                    self.profile_text = contents;
+                    self.profile_dirty = false;
                 }
             }
             self.output_target = OutputTarget::None;
@@ -487,11 +487,7 @@ impl KernelOptimizerApp {
             }
             args.extend(["--iperf-server".into(), self.iperf_server.clone()]);
         }
-        let slot_target = match slot {
-            ReportSlot::Baseline => ReportSlot::Baseline,
-            ReportSlot::Candidate => ReportSlot::Candidate,
-        };
-        self.pending_report = Some((PathBuf::from(output), slot_target));
+        self.pending_report = Some((PathBuf::from(output), slot));
         self.launch(args, false, OutputTarget::None);
     }
 
@@ -919,11 +915,10 @@ impl KernelOptimizerApp {
         ui.horizontal(|ui| {
             ui.label("Profile file");
             ui.add(egui::TextEdit::singleline(&mut self.profile_path).desired_width(360.0));
-            if ui.button("Open…").clicked() {
-                if let Some(path) = FileDialog::new().add_filter("TOML profile", &["toml"]).pick_file() {
+            if ui.button("Open…").clicked()
+                && let Some(path) = FileDialog::new().add_filter("TOML profile", &["toml"]).pick_file() {
                     self.profile_path = path.display().to_string();
                     self.load_profile();
-                }
             }
             if ui.button("Reload").clicked() {
                 self.load_profile();
@@ -975,11 +970,10 @@ impl KernelOptimizerApp {
         ui.horizontal(|ui| {
             ui.label("Profile");
             ui.add(egui::TextEdit::singleline(&mut self.profile_path).desired_width(340.0));
-            if ui.button("Browse…").clicked() {
-                if let Some(path) = FileDialog::new().add_filter("TOML profile", &["toml"]).pick_file() {
+            if ui.button("Browse…").clicked()
+                && let Some(path) = FileDialog::new().add_filter("TOML profile", &["toml"]).pick_file() {
                     self.profile_path = path.display().to_string();
                     self.load_profile();
-                }
             }
             if ui.button("Edit profile").clicked() {
                 self.page = Page::Profile;
@@ -1045,11 +1039,10 @@ impl KernelOptimizerApp {
         ui.horizontal(|ui| {
             ui.label("Profile");
             ui.add(egui::TextEdit::singleline(&mut self.profile_path).desired_width(330.0));
-            if ui.button("Browse…").clicked() {
-                if let Some(path) = FileDialog::new().add_filter("TOML profile", &["toml"]).pick_file() {
+            if ui.button("Browse…").clicked()
+                && let Some(path) = FileDialog::new().add_filter("TOML profile", &["toml"]).pick_file() {
                     self.profile_path = path.display().to_string();
                     self.load_profile();
-                }
             }
         });
         ui.horizontal(|ui| {
@@ -1098,10 +1091,9 @@ impl KernelOptimizerApp {
                 ui.add_enabled_ui(self.fio_enabled, |ui| {
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.fio_path).hint_text("Existing test directory").desired_width(190.0));
-                        if ui.button("…").clicked() {
-                            if let Some(path) = FileDialog::new().pick_folder() {
+                        if ui.button("…").clicked()
+                            && let Some(path) = FileDialog::new().pick_folder() {
                                 self.fio_path = path.display().to_string();
-                            }
                         }
                     });
                     ui.horizontal(|ui| {
@@ -1124,19 +1116,17 @@ impl KernelOptimizerApp {
                 ui.label("Baseline report");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.baseline_path).desired_width(220.0));
-                    if ui.button("…").clicked() {
-                        if let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).set_file_name("baseline.json").save_file() {
+                    if ui.button("…").clicked()
+                        && let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).set_file_name("baseline.json").save_file() {
                             self.baseline_path = path.display().to_string();
-                        }
                     }
                 });
                 ui.label("Candidate report");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.candidate_path).desired_width(220.0));
-                    if ui.button("…").clicked() {
-                        if let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).set_file_name("candidate.json").save_file() {
+                    if ui.button("…").clicked()
+                        && let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).set_file_name("candidate.json").save_file() {
                             self.candidate_path = path.display().to_string();
-                        }
                     }
                 });
                 ui.add_space(8.0);
@@ -1183,10 +1173,9 @@ impl KernelOptimizerApp {
                 ui.heading("Baseline JSON");
                 ui.add(egui::TextEdit::singleline(&mut self.baseline_path).desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
-                    if ui.button("Browse…").clicked() {
-                        if let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).pick_file() {
+                    if ui.button("Browse…").clicked()
+                        && let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).pick_file() {
                             self.baseline_path = path.display().to_string();
-                        }
                     }
                     if ui.button("Import baseline").clicked() {
                         self.load_report_into(&self.baseline_path.clone(), ReportSlot::Baseline);
@@ -1200,10 +1189,9 @@ impl KernelOptimizerApp {
                 ui.heading("Candidate JSON");
                 ui.add(egui::TextEdit::singleline(&mut self.candidate_path).desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
-                    if ui.button("Browse…").clicked() {
-                        if let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).pick_file() {
+                    if ui.button("Browse…").clicked()
+                        && let Some(path) = FileDialog::new().add_filter("Benchmark JSON", &["json"]).pick_file() {
                             self.candidate_path = path.display().to_string();
-                        }
                     }
                     if ui.button("Import candidate").clicked() {
                         self.load_report_into(&self.candidate_path.clone(), ReportSlot::Candidate);
