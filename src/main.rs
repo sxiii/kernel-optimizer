@@ -356,6 +356,10 @@ fn verify_staged_kernel(stage: &Path, release: &str) -> Result<(String, String, 
 fn validate_profile(p: &Profile) -> Result<()> {
     if !(1..=4096).contains(&p.jobs) { bail!("jobs must be between 1 and 4096"); }
     let _ = release_moniker(&p.source)?;
+    if matches!(p.source.as_str(), "linux-cachyos" | "linux-tkg") && !p.allow_unverified_sources {
+        bail!("{} requires allow_unverified_sources = true; its source material does not meet the pinned detached-signature policy",
+            if p.source == "linux-cachyos" { "CachyOS" } else { "Linux TKG" });
+    }
     if p.version != "stable" && p.version != "longterm" && !Regex::new(r"^\d+\.\d+(\.\d+)?$")?.is_match(&p.version) { bail!("invalid kernel version: {}", p.version); }
     if p.local_version.contains('/') || p.local_version.contains(' ') || p.local_version.contains('\n') { bail!("local_version may not contain slash, spaces or newlines"); }
     if !matches!(p.config_base.as_str(), "current" | "defconfig") { bail!("unsupported config_base '{}' (use current or defconfig)", p.config_base); }
@@ -406,6 +410,9 @@ fn doctor(profile_path: &Path) -> Result<()> {
     if matches!(p.source.as_str(), "linux-zen" | "linux-tkg") {
         required.push("patch");
     }
+    if matches!(p.source.as_str(), "linux-tkg") {
+        required.push("git");
+    }
     if matches!(p.source.as_str(), "linux-zen") {
         required.push("zstd");
     }
@@ -429,6 +436,19 @@ fn doctor(profile_path: &Path) -> Result<()> {
         Ok(Some(name)) => println!("[ ok ] pinned kernel.org signer key available in GPG keyring ({name})"),
         Ok(None) => { println!("[WARN] no pinned kernel.org signer key found in GPG keyring; import and verify a documented key before building"); warnings += 1; }
         Err(error) => { println!("[WARN] could not inspect GPG keyring: {error}"); warnings += 1; }
+    }
+
+    let patch_signer = match p.source.as_str() {
+        "linux-zen" => Some(("Linux Zen", "83BC8889351B5DEBBB68416EB8AC08600F108CDF")),
+        "linux-rt" => Some(("PREEMPT_RT", "64254695FFF0AA4466CC19E67B96E8162A8CF5D1")),
+        _ => None,
+    };
+    if let Some((name, fingerprint)) = patch_signer {
+        match provenance::fingerprint_available(p.gpg_home.as_deref(), fingerprint) {
+            Ok(true) => println!("[ ok ] pinned {name} patch signer key available"),
+            Ok(false) => { println!("[WARN] pinned {name} patch signer key {fingerprint} is missing from the configured GPG keyring"); warnings += 1; }
+            Err(error) => { println!("[WARN] could not inspect {name} patch signer key: {error}"); warnings += 1; }
+        }
     }
     if command_available("pahole") { println!("[ ok ] pahole available"); }
     else { println!("[WARN] pahole missing; BTF-enabled kernel configurations may fail"); warnings += 1; }
@@ -1392,6 +1412,12 @@ mod tests {
             ..Profile::default()
         };
         assert!(validate_profile(&profile).is_ok());
+        let profile = Profile { source: "linux-tkg".into(), ..Profile::default() };
+        assert!(validate_profile(&profile).is_err());
+        let profile = Profile { source: "linux-tkg".into(), allow_unverified_sources: true, ..Profile::default() };
+        assert!(validate_profile(&profile).is_ok());
+        let profile = Profile { source: "linux-cachyos".into(), ..Profile::default() };
+        assert!(validate_profile(&profile).is_err());
         assert_eq!(release_moniker("linux-zen").unwrap(), "stable");
         assert_eq!(release_moniker("linux-rt").unwrap(), "stable");
         assert_eq!(release_moniker("linux-cachyos").unwrap(), "stable");
