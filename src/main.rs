@@ -885,7 +885,7 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
         project: source_plan.as_ref().map(|plan| plan.project.clone())
             .unwrap_or_else(|| format!("Linux kernel.org {} track", if p.source == "linux-lts" { "longterm" } else { "stable" })),
         version:p.version.clone(),
-        archive_url:url,
+        archive_url:url.clone(),
         archive_sha256,
         signature_url:signature_url_text,
         signature_sha256,
