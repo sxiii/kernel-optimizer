@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use serde_json::Value;
-use std::{fs, path::{Path, PathBuf}, process::Command, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{fs, path::Path, process::Command, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveFormat { KernelXz, GzipTar }
@@ -291,5 +291,3 @@ pub fn verify_archive_digest(path: &Path, expected: Option<&str>) -> Result<Stri
     }
     Ok(actual)
 }
-
-pub fn clean_cache_path(build_dir: &Path, filename: &str) -> PathBuf { build_dir.join(filename) }
