@@ -115,9 +115,9 @@ fn read_manifest(stage_dir: &Path, release: &str) -> Result<(Manifest, PathBuf, 
     let manifest: Manifest = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing build provenance {}", manifest_path.display()))?;
 
-    if manifest.schema_version != 2 {
+    if !matches!(manifest.schema_version, 2 | 3) {
         bail!(
-            "unsupported provenance schema {}; expected schema 2",
+            "unsupported provenance schema {}; expected schema 2 or 3",
             manifest.schema_version
         );
     }
