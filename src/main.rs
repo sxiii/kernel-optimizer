@@ -475,6 +475,16 @@ fn download_signature(path: &Path, url: &str) -> Result<()> {
 // Re-extract the signed source archive on every build. Only the previous .config is
 // retained; local edits to source files cannot silently survive outside the signature.
 fn refresh_source_tree(archive: &Path, source: &Path, build_dir: &Path, version: &str) -> Result<bool> {
+    refresh_source_tree_with_layout(archive, source, build_dir, version, false)
+}
+
+fn refresh_source_tree_with_layout(
+    archive: &Path,
+    source: &Path,
+    build_dir: &Path,
+    version: &str,
+    strip_components: bool,
+) -> Result<bool> {
     let source_metadata = match fs::symlink_metadata(source) {
         Ok(metadata) => Some(metadata),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -496,23 +506,30 @@ fn refresh_source_tree(archive: &Path, source: &Path, build_dir: &Path, version:
     if temporary.exists() {
         fs::remove_dir_all(&temporary)?;
     }
-    fs::create_dir(&temporary)?;
-    let extraction = run_checked(
-        Command::new("tar")
-            .args(["--extract", "--file"])
-            .arg(archive)
-            .arg("--directory")
-            .arg(&temporary)
-            .args(["--no-same-owner", "--no-same-permissions"]),
-    );
+    let extraction_root = temporary.join("payload");
+    fs::create_dir_all(&extraction_root)?;
+    let mut tar = Command::new("tar");
+    tar.args(["--extract", "--file"])
+        .arg(archive)
+        .arg("--directory")
+        .arg(&extraction_root)
+        .args(["--no-same-owner", "--no-same-permissions"]);
+    if strip_components {
+        tar.arg("--strip-components=1");
+    }
+    let extraction = run_checked(&mut tar);
     if let Err(error) = extraction {
         let _ = fs::remove_dir_all(&temporary);
         return Err(error).context("extracting signed kernel source archive");
     }
-    let extracted_root = temporary.join(format!("linux-{version}"));
-    if !extracted_root.is_dir() {
+    let extracted_root = if strip_components {
+        extraction_root.clone()
+    } else {
+        extraction_root.join(format!("linux-{version}"))
+    };
+    if !extracted_root.is_dir() || !extracted_root.join("Makefile").is_file() {
         let _ = fs::remove_dir_all(&temporary);
-        bail!("signed archive did not contain expected top-level directory linux-{version}");
+        bail!("source archive does not contain the expected kernel source tree");
     }
     let backup = build_dir.join(format!(".kernel-optimizer-old-source-{}-{stamp}", std::process::id()));
     let had_source = source_metadata.is_some();
