@@ -911,11 +911,24 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     };
     let compiler_command=if p.ccache { format!("ccache {}",p.compiler) } else { p.compiler.clone() };
     let mut recorded_commands=vec![
-        "curl --fail --location --retry 3 (download kernel.org archive and detached signature)".into(),
-        "xz -t <archive>".into(),
-        "xz --decompress --stdout <archive> | gpg --no-options --batch --no-auto-key-import --no-auto-key-retrieve --no-auto-key-locate --status-fd=1 --verify <signature> -".into(),
-        "tar --extract --file <signature-verified archive> --no-same-owner --no-same-permissions".into(),
+        format!("curl --fail --location --retry 3 (download source archive from {url})"),
+        match (signature_url.as_deref(), source_plan.as_ref().and_then(|plan| plan.expected_archive_sha256.as_deref())) {
+            (Some(_), _) => "verify base archive detached signature against the pinned signer allowlist".into(),
+            (None, Some(_)) => "verify source archive SHA-256 against the digest advertised by the upstream GitHub release".into(),
+            (None, None) => "no detached source signature or upstream digest was available".into(),
+        },
+        if archive_format == source_adapters::ArchiveFormat::GzipTar {
+            "gzip -t <source archive>; extract with --strip-components=1".into()
+        } else {
+            "xz -t <source archive>; extract the signed kernel.org source archive".into()
+        },
     ];
+    for patch in &manifest.source.patches {
+        recorded_commands.push(format!(
+            "download and apply source patch {} (sha256 {}; signature verified: {}; Git blob: {})",
+            patch.name, patch.sha256, patch.signature_verified, patch.git_blob_sha1
+        ));
+    }
     if config_origin == "defconfig" || config_origin == "defconfig_fallback" {
         recorded_commands.push("make defconfig".into());
     }
