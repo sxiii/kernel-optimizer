@@ -134,17 +134,19 @@ staged-build finalization, system tuning previews/apply/revert, benchmark execut
 and benchmark JSON comparison. It includes live command output and activity logs,
 native file pickers, median comparison bars, and per-iteration sample charts.
 
-The build, benchmark, tuning and comparison pages call the existing CLI implementation;
-the GUI does not maintain a second copy of the kernel-build or tuning logic. A
-`menuconfig` build and the existing terminal dashboard open in an external terminal
-because they require an interactive TTY. Applying or reverting system tuning uses
-`pkexec` / PolicyKit for a separate administrator authorization prompt. Run the GUI
-as your ordinary user, not with `sudo`.
+The build, benchmark, tuning, package creation and comparison pages call the
+existing CLI implementation; the GUI does not maintain a second copy of kernel-build
+or tuning logic. A `menuconfig` build and the terminal dashboard open in an external
+terminal because they require an interactive TTY. Applying/reverting system tuning
+and installing a finished kernel package use `pkexec` / PolicyKit authorization.
+Run the GUI as your ordinary user, not with `sudo`.
 
-The Install page is intentionally marked unavailable. The CLI install command is
-still disabled until distribution-specific packaging, initramfs, module-signing,
-boot-entry and rollback adapters are implemented. The GUI does not bypass that
-safety boundary.
+The Installation page builds an Arch pacman package from finalized staging artifacts
+and can install it as a separate authorized operation. It detects the active
+mkinitcpio or dracut pacman hook (including Garuda's dracut integration). Bootloader
+entry creation and Secure Boot/module signing remain deliberately unsupported;
+keep the current known-good boot entry and add the new entry manually after package
+installation.
 
 On Arch/Garuda, install the GUI build dependencies if they are not already present:
 
