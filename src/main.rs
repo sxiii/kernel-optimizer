@@ -196,7 +196,7 @@ fn ensure_kernel_archive(archive: &Path, url: &str) -> Result<()> {
     let download_result = (|| -> Result<()> {
         run_checked(
             Command::new("curl")
-                .args(["--fail", "--location", "--retry", "3", "--output"])
+                .args(["--fail", "--location", "--retry", "3", "--silent", "--show-error", "--output"])
                 .arg(&temporary)
                 .arg(url),
         )?;
