@@ -1582,6 +1582,22 @@ impl KernelOptimizerApp {
         ui.horizontal(|ui| {
             ui.label(if self.running { "Operation running" } else { "Idle" });
             ui.label(RichText::new(&self.status).color(if self.running { Color32::from_rgb(235, 191, 104) } else { Color32::from_rgb(125, 208, 161) }));
+            let log_text = self.logs.iter().cloned().collect::<Vec<_>>().join("\n");
+            if ui.add_enabled(!self.logs.is_empty(), egui::Button::new("Copy all")).clicked() {
+                ui.ctx().copy_text(log_text.clone());
+                self.status = format!("Copied {} log lines to clipboard", self.logs.len());
+            }
+            if ui.add_enabled(!self.logs.is_empty(), egui::Button::new("Save log...")).clicked()
+                && let Some(path) = FileDialog::new()
+                    .add_filter("Text log", &["log", "txt"])
+                    .set_file_name("kernel-optimizer-activity.log")
+                    .save_file()
+            {
+                match fs::write(&path, &log_text) {
+                    Ok(()) => self.status = format!("Saved activity log to {}", path.display()),
+                    Err(error) => self.status = format!("Could not save activity log: {error}"),
+                }
+            }
             if ui.button("Clear log").clicked() {
                 self.logs.clear();
             }
@@ -1592,13 +1608,14 @@ impl KernelOptimizerApp {
             }
         });
         ui.label(RichText::new(&self.current_command).small().monospace().color(Color32::GRAY));
+        ui.label(RichText::new("Log lines are selectable. Use Copy all or Save log... to share the complete output.").small().color(Color32::GRAY));
         ui.add_space(6.0);
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for line in &self.logs {
-                    ui.label(RichText::new(line).monospace().size(11.5));
+                    ui.add(egui::Label::new(RichText::new(line).monospace().size(11.5)).selectable(true));
                 }
             });
     }
