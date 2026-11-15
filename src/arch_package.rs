@@ -829,8 +829,8 @@ mod tests {
     fn mkinitcpio_preset_uses_unique_kernel_and_initramfs_names() {
         let package_name = package_name_for_release("7.3.4-ko").unwrap();
         let preset = make_preset("7.3.4-ko", &package_name);
-        assert!(preset.contains("ALL_kver='/boot/vmlinuz-linux-optimizer-7-3-4-ko'"));
-        assert!(preset.contains("default_image='/boot/initramfs-linux-optimizer-7-3-4-ko.img'"));
-        assert!(preset.contains("fallback_image='/boot/initramfs-linux-optimizer-7-3-4-ko-fallback.img'"));
+        assert!(preset.contains("ALL_kver='/boot/vmlinuz-linux-optimizer-7.3.4-ko'"));
+        assert!(preset.contains("default_image='/boot/initramfs-linux-optimizer-7.3.4-ko.img'"));
+        assert!(preset.contains("fallback_image='/boot/initramfs-linux-optimizer-7.3.4-ko-fallback.img'"));
     }
 }
