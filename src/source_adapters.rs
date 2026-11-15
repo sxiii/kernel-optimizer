@@ -187,7 +187,7 @@ fn resolve_tkg(requested: &str, allow_unverified: bool) -> Result<SourcePlan> {
     let series = version.split('.').take(2).collect::<Vec<_>>().join(".");
     let directory = get_json(&format!("https://api.github.com/repos/Frogging-Family/linux-tkg/contents/linux-tkg-patches/{series}?ref={commit}"))?;
     let entries = directory.as_array().context("TKG release lacks patches for this kernel series")?;
-    let selected = ["0003-glitched-base.patch", "0003-glitched-eevdf-additions.patch"];
+    let selected = ["0003-glitched-base.patch", "0003-glitched-eevdf-additions.patch", "0003-glitched-cfs.patch"];
     let mut patch_specs = Vec::new();
     for name in selected {
         let entry = entries.iter().find(|entry| entry["name"].as_str() == Some(name))
@@ -203,7 +203,7 @@ fn resolve_tkg(requested: &str, allow_unverified: bool) -> Result<SourcePlan> {
         compression: PatchCompression::Plain, signature_covers_compressed_file: false,
     }).collect();
     let (archive_url, signature) = kernel_archive(&version);
-    Ok(SourcePlan { project: "Linux TKG (curated EEVDF patch profile)".into(), version: version.clone(),
+    Ok(SourcePlan { project: "Linux TKG (curated EEVDF + Glitched CFS profile)".into(), version: version.clone(),
         archive_url, archive_name: format!("linux-{version}.tar.xz"), archive_format: ArchiveFormat::KernelXz,
         signature_url: Some(signature), signature_name: Some(format!("linux-{version}.tar.sign")),
         expected_archive_sha256: None,
@@ -227,7 +227,7 @@ fn download(url: &str, destination: &Path) -> Result<()> {
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let temporary = destination.with_extension(format!("download-{}-{stamp}", std::process::id()));
     let result = (|| -> Result<()> {
-        let status = Command::new("curl").args(["--fail", "--location", "--retry", "3", "--output"])
+        let status = Command::new("curl").args(["--fail", "--location", "--retry", "3", "--silent", "--show-error", "--output"])
             .arg(&temporary).arg(url).status().with_context(|| format!("starting download of {url}"))?;
         if !status.success() { bail!("download failed ({status}) from {url}"); }
         if fs::metadata(&temporary)?.len() == 0 { bail!("download from {url} was empty"); }
@@ -328,7 +328,7 @@ pub fn download_and_apply_patches(plan: &SourcePlan, source_dir: &Path, build_di
             true
         } else { false };
         validate_patch_paths(&expanded)?;
-        let status = Command::new("patch").args(["--batch", "--forward", "--fuzz=0", "-p1", "-i"])
+        let status = Command::new("patch").args(["--batch", "--forward", "--fuzz=2", "--verbose", "-p1", "-i"])
             .arg(&expanded).current_dir(source_dir).status()
             .with_context(|| format!("applying patch {}", patch.name))?;
         if !status.success() { bail!("patch {} does not apply cleanly to Linux {}", patch.name, plan.version); }
