@@ -222,7 +222,7 @@ kernel-optimizer arch-package --profile kernel-optimizer.toml \
 
 # Install the generated package as a separate, explicit administrator action.
 sudo kernel-optimizer install \
-  --package /var/tmp/kernel-optimizer/packages/linux-optimizer-7-3-4-ko-7.3.4-1-x86_64.pkg.tar.zst \
+  --package /var/tmp/kernel-optimizer/packages/linux-optimizer-7.3.4-ko-7.3.4-1-x86_64.pkg.tar.zst \
   --yes
 ```
 
