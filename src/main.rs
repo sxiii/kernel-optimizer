@@ -1062,7 +1062,7 @@ fn finalize(profile_path: &Path, version_override: Option<&str>) -> Result<()> {
     let generated_unix = unix_timestamp();
 
     let source_manifest = SourceProvenance {
-        project: "Linux kernel.org upstream".into(),
+        project: format!("Linux kernel.org {} track (recovered)", if p.source == "linux-lts" { "longterm" } else { "stable" }),
         version: version.clone(),
         archive_url,
         archive_sha256,

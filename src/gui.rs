@@ -918,7 +918,7 @@ impl KernelOptimizerApp {
         ui.add_space(8.0);
         if self.sources_text.trim().is_empty() {
             self.sources_text = String::from(
-                "SOURCE            TRACK / PURPOSE\nlinux             Latest stable upstream kernel (kernel.org)\nlinux-lts          Long-term support upstream kernel series\nlinux-zen          Desktop responsiveness / low-latency patchset (Arch)\nlinux-cachyos      CachyOS patches and scheduler/config profiles\nlinux-tkg          Community kernel patch/config framework (TKG)\nlinux-rt           PREEMPT_RT real-time patchset (specialized workloads)\n\nOnly upstream linux is fetched automatically. Other tracks are planned adapters; no untrusted patch URL is executed.",
+                "SOURCE            STATUS       TRACK / PURPOSE\nlinux             SUPPORTED    Latest stable kernel.org release\nlinux-lts          SUPPORTED    Latest longterm kernel.org release\nlinux-zen          PLANNED      Signed Zen source adapter pending\nlinux-cachyos      PLANNED      Signed CachyOS source and patch manifest pending\nlinux-tkg          PLANNED      Audited patch adapter pending (no scripts executed)\nlinux-rt           PLANNED      PREEMPT_RT patch signer/version adapter pending\n\nOnly supported tracks can be built. Planned tracks remain visible but fail closed until source provenance is verified.",
             );
         }
         Self::card(ui, |ui| {
