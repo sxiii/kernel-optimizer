@@ -1366,6 +1366,10 @@ impl KernelOptimizerApp {
                             ui.label("Remove Kernel Optimizer's managed tuning files?");
                             ui.label("This reloads sysctl and udev configuration.");
                         }
+                        PrivilegedAction::InstallPackage => {
+                            ui.label("Install the selected kernel package?");
+                            ui.label("This modifies /boot and /usr/lib/modules. No bootloader entry will be changed.");
+                        }
                     }
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
