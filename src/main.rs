@@ -78,8 +78,25 @@ enum Commands {
     Tune { #[arg(long, value_enum, default_value="desktop")] profile: Workload, #[arg(long)] dry_run: bool },
     /// Remove optimizer-managed sysctl and udev drop-ins.
     Revert { #[arg(long)] dry_run: bool },
-    /// Reserved: installation stays disabled until package and rollback adapters are available.
-    Install { #[arg(long)] staged: Option<PathBuf>, #[arg(long)] yes: bool },
+    /// Build a reviewable Arch Linux package from verified staged kernel artifacts.
+    ArchPackage {
+        #[arg(long, default_value="kernel-optimizer.toml")]
+        profile: PathBuf,
+        /// Upstream kernel version (inferred when omitted).
+        #[arg(long)]
+        version: Option<String>,
+        /// Package output directory (defaults to <stage_dir>/packages).
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
+    /// Install a previously built kernel-optimizer Arch package via pacman.
+    Install {
+        #[arg(long)]
+        package: PathBuf,
+        /// Acknowledge the package transaction after reviewing the plan.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
