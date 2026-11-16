@@ -974,13 +974,21 @@ mod tests {
         assert!(fs::metadata(&package).unwrap().len() > 0);
 
         let package_info = Command::new("pacman")
-            .args(["-Qp", "--print-format", "%n|%v|%a"])
+            .args(["-Qip"])
             .arg(&package)
             .output()
             .unwrap();
-        assert!(package_info.status.success());
+        assert!(
+            package_info.status.success(),
+            "pacman could not inspect the built package: {}",
+            String::from_utf8_lossy(&package_info.stderr)
+        );
         let info = String::from_utf8_lossy(&package_info.stdout);
-        assert!(info.starts_with(&format!("linux-optimizer-{release}|")));
+        let package_name = info.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == "Name").then(|| value.trim())
+        });
+        assert_eq!(package_name, Some(format!("linux-optimizer-{release}").as_str()));
         fs::remove_dir_all(root).unwrap();
     }
 }
