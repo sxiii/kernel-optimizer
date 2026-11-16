@@ -301,6 +301,20 @@ fn write_package_sources(input: PackageSourceInput<'_>) -> Result<()> {
     } else {
         String::new()
     };
+    let payload_archive = workspace.join("payload.tar");
+    let tar_status = Command::new("tar")
+        .args(["--create", "--file"])
+        .arg(&payload_archive)
+        .arg("--directory")
+        .arg(workspace)
+        .arg("payload")
+        .status()
+        .context("creating a source archive for the staged kernel payload")?;
+    if !tar_status.success() {
+        bail!("tar failed while archiving the staged kernel payload ({tar_status})");
+    }
+    let payload_sha256 = crate::provenance::sha256_file(&payload_archive)?;
+    let payload_source = format!("file://{}", payload_archive.display());
     let kernel_image_path = format!("vmlinuz-{package_name}");
     let pkgbuild = format!(
         r#"pkgname={package_name}
@@ -311,6 +325,8 @@ arch=('x86_64')
 url='https://github.com/sxiii/kernel-optimizer'
 license=('GPL-2.0-only')
 depends=('kmod' '{initramfs_backend}')
+source=('{payload_source}')
+sha256sums=('{payload_sha256}')
 options=('!strip')
 KERNEL_RELEASE='{release}'
 
