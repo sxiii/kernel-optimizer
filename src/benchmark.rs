@@ -320,14 +320,32 @@ fn validate_report(report: &BenchmarkReport, label: &str) -> Result<()> {
         if result.samples.is_empty() || result.iterations != result.samples.len() {
             bail!("{label} metric '{}' has inconsistent iteration/sample counts", result.name);
         }
-        if result.samples.iter().any(|sample| !sample.is_finite())
+        if result.samples.iter().any(|sample| !sample.is_finite() || *sample < 0.0)
             || !result.median.is_finite()
             || !result.min.is_finite()
             || !result.max.is_finite()
-            || result.min > result.median
-            || result.median > result.max
+            || result.median < 0.0
+            || result.min < 0.0
+            || result.max < 0.0
         {
-            bail!("{label} metric '{}' contains invalid or inconsistent numeric values", result.name);
+            bail!("{label} metric '{}' contains invalid numeric values", result.name);
+        }
+
+        let mut ordered_samples = result.samples.clone();
+        let expected_median = median(&mut ordered_samples);
+        let expected_min = result.samples.iter().copied().fold(f64::INFINITY, f64::min);
+        let expected_max = result.samples.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let close_enough = |actual: f64, expected: f64| {
+            (actual - expected).abs() <= 1e-9 * actual.abs().max(expected.abs()).max(1.0)
+        };
+        if !close_enough(result.min, expected_min)
+            || !close_enough(result.median, expected_median)
+            || !close_enough(result.max, expected_max)
+        {
+            bail!(
+                "{label} metric '{}' summary values do not match its samples",
+                result.name
+            );
         }
     }
     Ok(())
@@ -388,6 +406,13 @@ fn compare_reports(baseline: &BenchmarkReport, candidate: &BenchmarkReport) -> R
             continue;
         }
         let change = (new.median / old.median - 1.0) * 100.0;
+        if !change.is_finite() {
+            output.push_str(&format!(
+                "{:<28} {:>11.2} {:>11.2} {:>10} {:>20}\n",
+                old.name, old.median, new.median, "n/a", "extreme ratio"
+            ));
+            continue;
+        }
         let improved = if old.higher_is_better { change > 0.0 } else { change < 0.0 };
         let result = if change.abs() < 0.5 {
             "similar"
@@ -491,6 +516,68 @@ mod tests {
         invalid.samples.clear();
         let bad = test_report(vec![invalid]);
         assert!(compare_reports(&candidate, &bad).is_err());
+    }
+
+    #[test]
+    fn report_validation_rejects_duplicate_metrics() {
+        let duplicate = test_report(vec![
+            test_result("cpu", 10.0, "rounds"),
+            test_result("cpu", 11.0, "rounds"),
+        ]);
+        assert!(validate_report(&duplicate, "test").is_err());
+    }
+
+    #[test]
+    fn report_validation_rejects_summary_values_that_do_not_match_samples() {
+        let mut result = test_result("cpu", 10.0, "rounds");
+        result.samples = vec![9.0, 10.0, 11.0];
+        result.min = 8.0;
+        let report = test_report(vec![result]);
+        assert!(validate_report(&report, "test").is_err());
+    }
+
+    #[test]
+    fn report_validation_rejects_negative_and_non_finite_samples() {
+        let mut negative = test_result("cpu", 1.0, "rounds");
+        negative.samples = vec![-1.0, 1.0, 3.0];
+        negative.min = -1.0;
+        let negative_report = test_report(vec![negative]);
+        assert!(validate_report(&negative_report, "test").is_err());
+
+        let mut non_finite = test_result("cpu", 1.0, "rounds");
+        non_finite.samples = vec![1.0, f64::NAN, 1.0];
+        let non_finite_report = test_report(vec![non_finite]);
+        assert!(validate_report(&non_finite_report, "test").is_err());
+    }
+
+    #[test]
+    fn comparison_respects_lower_is_better_metrics() {
+        let mut baseline_result = test_result("latency", 10.0, "request");
+        baseline_result.higher_is_better = false;
+        let mut candidate_result = test_result("latency", 8.0, "request");
+        candidate_result.higher_is_better = false;
+        let baseline = test_report(vec![baseline_result]);
+        let candidate = test_report(vec![candidate_result]);
+        let output = compare_reports(&baseline, &candidate).unwrap();
+        assert!(output.contains("improved"));
+    }
+
+    #[test]
+    fn comparison_handles_extreme_finite_ratios_without_infinity_output() {
+        let baseline = test_report(vec![test_result("throughput", 1e-300, "tiny")]);
+        let candidate = test_report(vec![test_result("throughput", 1e300, "tiny")]);
+        let output = compare_reports(&baseline, &candidate).unwrap();
+        assert!(output.contains("extreme ratio"));
+        assert!(!output.contains("inf%"));
+    }
+
+    #[test]
+    fn comparison_handles_two_zero_baselines_as_similar() {
+        let baseline = test_report(vec![test_result("metric", 0.0, "test")]);
+        let candidate = test_report(vec![test_result("metric", 0.0, "test")]);
+        let output = compare_reports(&baseline, &candidate).unwrap();
+        assert!(output.contains("similar"));
+        assert!(output.contains("+0.00%"));
     }
 
     #[test]
