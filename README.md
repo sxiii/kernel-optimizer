@@ -30,7 +30,8 @@ not automated.
 - [x] Build and inspect a real pacman package in a clean Arch container as an unprivileged user (GitHub Actions).
 - [ ] Validate full kernel builds and tuning on Debian/Ubuntu and Fedora, plus additional supported kernel configurations. Application compile/lint/test smoke jobs have passed on Debian and Fedora; full kernel builds and tuning on those distributions are not yet validated.
 - [ ] Add module-signing support and a complete Secure Boot signing/enrollment workflow; current install checks fail closed when Secure Boot is enabled or uncertain.
-- [x] Detect firmware mode, standard bootloader installations, boot menu entries, EFI boot variables and mounted ESP/boot filesystems without changing them.\n- [ ] Design safe boot-entry creation with a preserved known-good fallback and tested rollback.
+- [x] Detect firmware mode, standard bootloader installations, boot menu entries, EFI boot variables and mounted ESP/boot filesystems without changing them.
+- [ ] Design safe boot-entry creation with a preserved known-good fallback and tested rollback.
 - [ ] Add reproducible hardware-specific benchmark suites only where the workload and limitations can be documented.
 
 The application can create and install a kernel package as a separate, explicit action.
