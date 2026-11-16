@@ -362,9 +362,13 @@ fn ensure_tool(program: &str) -> Result<()> {
     Ok(())
 }
 
-fn active_pacman_hook(name: &str) -> Option<PathBuf> {
-    let system = PathBuf::from("/usr/share/libalpm/hooks").join(name);
-    let local = PathBuf::from("/etc/pacman.d/hooks").join(name);
+fn active_pacman_hook_in(
+    system_dir: &Path,
+    local_dir: &Path,
+    name: &str,
+) -> Option<PathBuf> {
+    let system = system_dir.join(name);
+    let local = local_dir.join(name);
 
     // A local hook with the same name takes precedence. Respect /dev/null masks.
     match fs::symlink_metadata(&local) {
@@ -382,6 +386,14 @@ fn active_pacman_hook(name: &str) -> Option<PathBuf> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => system.is_file().then_some(system),
         Err(_) => None,
     }
+}
+
+fn active_pacman_hook(name: &str) -> Option<PathBuf> {
+    active_pacman_hook_in(
+        Path::new("/usr/share/libalpm/hooks"),
+        Path::new("/etc/pacman.d/hooks"),
+        name,
+    )
 }
 
 fn hook_exec(hook: &Path) -> Option<PathBuf> {
@@ -456,6 +468,22 @@ pub fn build(
     version: &str,
     output_dir: &Path,
 ) -> Result<PathBuf> {
+    let initramfs_backend = detect_initramfs_backend()?;
+    build_with_backend(stage_dir, release, version, output_dir, initramfs_backend)
+}
+
+fn build_with_backend(
+    stage_dir: &Path,
+    release: &str,
+    version: &str,
+    output_dir: &Path,
+    initramfs_backend: &str,
+) -> Result<PathBuf> {
+    if !matches!(initramfs_backend, "mkinitcpio" | "dracut") {
+        bail!("unsupported initramfs backend for package build: {initramfs_backend}");
+    }
+    ensure_tool(initramfs_backend)?;
+
     if !valid_version(version) {
         bail!("invalid package version '{version}'");
     }
@@ -468,8 +496,6 @@ pub fn build(
     let architecture = arch_name()?;
     ensure_tool("makepkg")?;
     ensure_tool("pacman")?;
-    let initramfs_backend = detect_initramfs_backend()?;
-
     let stage_dir = fs::canonicalize(stage_dir)
         .with_context(|| format!("resolving staging directory {}", stage_dir.display()))?;
     let (manifest, image, modules, config, system_map) =
@@ -785,6 +811,39 @@ mod tests {
     }
 
     #[test]
+    fn active_hook_prefers_local_override_and_honors_dev_null_masks() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-hook-precedence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let system = root.join("usr/share/libalpm/hooks");
+        let local = root.join("etc/pacman.d/hooks");
+        fs::create_dir_all(&system).unwrap();
+        fs::create_dir_all(&local).unwrap();
+        let name = "90-mkinitcpio-install.hook";
+        let system_hook = system.join(name);
+        let local_hook = local.join(name);
+        fs::write(&system_hook, "[Action]\\nExec = /usr/bin/system-hook\\n").unwrap();
+        fs::write(&local_hook, "[Action]\\nExec = /usr/bin/local-hook\\n").unwrap();
+
+        assert_eq!(
+            active_pacman_hook_in(&system, &local, name).as_deref(),
+            Some(local_hook.as_path())
+        );
+
+        fs::remove_file(&local_hook).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/dev/null", &local_hook).unwrap();
+        assert!(active_pacman_hook_in(&system, &local, name).is_none());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn hook_target_match_requires_kernel_vmlinuz_or_pkgbase() {
         let root = std::env::temp_dir().join(format!(
             "kernel-optimizer-hook-target-{}-{}",
@@ -892,7 +951,9 @@ mod tests {
         ).unwrap();
 
         let output = root.join("packages");
-        let package = build(&stage, release, "1.0", &output).unwrap();
+        // Backend selection is tested independently of host hook discovery below.
+        // The public build() entry point still requires a real active pacman hook.
+        let package = build_with_backend(&stage, release, "1.0", &output, "mkinitcpio").unwrap();
         assert!(package.is_file());
         assert!(fs::metadata(&package).unwrap().len() > 0);
 
