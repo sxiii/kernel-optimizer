@@ -2,7 +2,7 @@
 
 A Rust CLI prototype for inspecting Linux hardware, discovering the current upstream stable kernel, creating an explicit build profile, compiling a kernel and staging artifacts for review.
 
-> **Safety:** this project does not replace your running kernel, install modules into the host, or modify GRUB/systemd-boot. Build output is staged separately. Bootloader integration is intentionally disabled until distribution-specific package and rollback adapters exist.
+> **Safety:** this project does not replace your running kernel or modify GRUB/systemd-boot. Build output is staged separately; Arch/Garuda package installation is a separate, explicitly authorized step. Bootloader entry creation and rollback automation remain disabled.
 
 ## Status
 
@@ -507,10 +507,11 @@ inventing them. Source signature verification and staged artifact hashes are
 recomputed during recovery. The recovered manifest cannot independently prove
 that the source tree was not edited after the original extraction.
 
-The build remains staged outside the live boot path. Initramfs generation,
-distribution package creation, module signing, Secure Boot enrollment, bootloader
-entry creation and rollback integration are not yet automated. Keep a known-good
-boot entry and review the staged image before installing it.
+The build remains staged outside the live boot path. Arch/Garuda package creation and
+installation are implemented separately, and the package's pacman hook generates the
+initramfs. Module signing, Secure Boot key enrollment, bootloader entry creation and
+automated boot-entry rollback are not implemented. Keep a known-good boot entry and
+review the staged image before installing it.
 
 
 ## Kernel source tracks
