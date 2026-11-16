@@ -833,4 +833,77 @@ mod tests {
         assert!(preset.contains("default_image='/boot/initramfs-linux-optimizer-7.3.4-ko.img'"));
         assert!(preset.contains("fallback_image='/boot/initramfs-linux-optimizer-7.3.4-ko-fallback.img'"));
     }
+
+    #[test]
+    fn arch_package_build_smoke_in_clean_environment() {
+        if std::env::var_os("KERNEL_OPTIMIZER_RUN_ARCH_PACKAGE_INTEGRATION").is_none() {
+            return;
+        }
+        if unsafe { libc::geteuid() } == 0 {
+            panic!("Arch package integration test must run as an unprivileged build user");
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-arch-package-integration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let stage = root.join("stage");
+        let release = "7.3.4-ko";
+        let boot = stage.join("boot");
+        let modules = stage.join("root/lib/modules").join(release);
+        fs::create_dir_all(&boot).unwrap();
+        fs::create_dir_all(&modules).unwrap();
+
+        let image = boot.join(format!("vmlinuz-{release}"));
+        let config = boot.join(format!("config-{release}"));
+        let system_map = boot.join(format!("System.map-{release}"));
+        fs::write(&image, b"synthetic kernel image for package integration test").unwrap();
+        fs::write(&config, "CONFIG_MODULE_SIG_FORCE=n\nCONFIG_TEST=y\n").unwrap();
+        fs::write(&system_map, "00000000 T _text\n").unwrap();
+        fs::write(modules.join("modules.dep"), "kernel/test.ko:\n").unwrap();
+        fs::write(modules.join("modules.alias"), "alias test:* test\n").unwrap();
+
+        let image_hash = crate::provenance::sha256_file(&image).unwrap();
+        let config_hash = crate::provenance::sha256_file(&config).unwrap();
+        let system_map_hash = crate::provenance::sha256_file(&system_map).unwrap();
+        let (modules_hash, _, _) = crate::provenance::sha256_tree(&modules).unwrap();
+        let manifest = serde_json::json!({
+            "schema_version": 3,
+            "source": { "signature_verified": true },
+            "build": { "effective_config_sha256": config_hash },
+            "artifacts": {
+                "kernel_release": release,
+                "kernel_image": format!("boot/vmlinuz-{release}"),
+                "kernel_image_sha256": image_hash,
+                "system_map": format!("boot/System.map-{release}"),
+                "system_map_sha256": system_map_hash,
+                "modules_directory": format!("root/lib/modules/{release}"),
+                "modules_staged": true,
+                "modules_tree_sha256": modules_hash
+            }
+        });
+        fs::write(
+            stage.join("provenance.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        ).unwrap();
+
+        let output = root.join("packages");
+        let package = build(&stage, release, "1.0", &output).unwrap();
+        assert!(package.is_file());
+        assert!(fs::metadata(&package).unwrap().len() > 0);
+
+        let package_info = Command::new("pacman")
+            .args(["-Qp", "--print-format", "%n|%v|%a"])
+            .arg(&package)
+            .output()
+            .unwrap();
+        assert!(package_info.status.success());
+        let info = String::from_utf8_lossy(&package_info.stdout);
+        assert!(info.starts_with(&format!("linux-optimizer-{release}|")));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
