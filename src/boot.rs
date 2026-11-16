@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     process::Command,
 };
 
@@ -175,10 +175,9 @@ fn collect_filesystems(value: &Value, output: &mut Vec<BootMount>) {
         return;
     }
     let target = value.get("target").and_then(Value::as_str).unwrap_or_default();
-    if !target.is_empty() {
+    if matches!(target, "/boot" | "/efi" | "/boot/efi" | "/boot/esp" | "/esp") {
         let source = value.get("source").and_then(Value::as_str).unwrap_or_default();
         let filesystem = value.get("fstype").and_then(Value::as_str).unwrap_or_default();
-        let is_boot_target = matches!(target, "/boot" | "/efi" | "/boot/efi" | "/boot/esp" | "/esp");
         let is_fat = matches!(
             filesystem.to_ascii_lowercase().as_str(),
             "vfat" | "fat" | "fat32" | "msdos"
@@ -187,7 +186,7 @@ fn collect_filesystems(value: &Value, output: &mut Vec<BootMount>) {
             target: target.to_owned(),
             source: source.to_owned(),
             filesystem: filesystem.to_owned(),
-            is_efi_system_partition: is_boot_target && is_fat,
+            is_efi_system_partition: is_fat,
         });
     }
     if let Some(children) = value.get("children") {
@@ -410,10 +409,9 @@ mod tests {
             ]
         }"#;
         let mounts = parse_mounts_json(input);
-        assert_eq!(mounts.len(), 3);
+        assert_eq!(mounts.len(), 2);
         assert!(mounts.iter().find(|mount| mount.target == "/boot").unwrap().is_efi_system_partition);
         assert!(mounts.iter().find(|mount| mount.target == "/efi").unwrap().is_efi_system_partition);
-        assert!(!mounts.iter().find(|mount| mount.target == "/").unwrap().is_efi_system_partition);
     }
 
     #[test]
