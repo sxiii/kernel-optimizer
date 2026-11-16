@@ -56,9 +56,11 @@ jobs:
       image: archlinux:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install clean Arch build environment
+      - name: Initialize pacman keyring and install clean Arch build environment
+        shell: bash
         run: |
-          pacman -Sy --noconfirm archlinux-keyring
+          pacman-key --init
+          pacman-key --populate archlinux
           pacman -Syu --noconfirm --needed \
             base-devel rust cargo mkinitcpio kmod \
             libxcb libx11 libxi libxrandr libxinerama libxcursor \
