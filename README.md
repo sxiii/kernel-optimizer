@@ -22,11 +22,11 @@ not automated.
 - [x] CPU, memory, optional fio/iperf3 benchmarks and validated JSON report comparison.
 - [x] Arch/Garuda pacman package creation and separately authorized installation; initramfs generation is delegated to the detected active pacman hook.
 - [x] Native desktop GUI, CLI/TUI workflows, selectable activity logs, copy/save controls, and PolicyKit-gated privileged actions.
-- [x] Hardware-independent regression tests and GitHub Actions lint/test checks.
+- [x] Hardware-independent regression tests and GitHub Actions lint/test checks, including a temporary-keyring GPG signature test that rejects altered archives.
 
 **Next**
 
-- [ ] Add end-to-end signature-verification tests using an isolated test keyring and deliberately corrupted archives/signatures.
+- [x] End-to-end kernel archive signature verification test using an isolated temporary GPG keyring, a generated test signer and a tampered-archive rejection case.
 - [ ] Add a clean disposable Arch/Garuda package-build integration test.
 - [ ] Validate builds and tuning on Debian/Ubuntu and Fedora, plus additional supported kernel configurations.
 - [ ] Add module-signing support and a complete Secure Boot signing/enrollment workflow; current install checks fail closed when Secure Boot is enabled or uncertain.
