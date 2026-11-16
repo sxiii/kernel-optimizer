@@ -170,45 +170,64 @@ fn release_moniker(source: &str)->Result<&'static str> {
         other => bail!("unknown kernel source '{other}'"),
     }
 }
-fn ensure_kernel_archive(archive: &Path, url: &str) -> Result<()> {
-    let cached_is_valid = archive.exists()
-        && Command::new("xz")
-            .arg("-t")
-            .arg(archive)
-            .status()
-            .is_ok_and(|status| status.success());
-    if cached_is_valid {
+fn ensure_archive_with(
+    archive: &Path,
+    mut validate: impl FnMut(&Path) -> Result<()>,
+    mut download: impl FnMut(&Path) -> Result<()>,
+) -> Result<()> {
+    if archive.is_file() && validate(archive).is_ok() {
         return Ok(());
     }
     if archive.exists() {
-        eprintln!(
-            "Cached kernel archive {} failed integrity testing; downloading a fresh copy.",
-            archive.display()
-        );
         fs::remove_file(archive)
-            .with_context(|| format!("removing invalid archive {}", archive.display()))?;
+            .with_context(|| format!("removing invalid cached archive {}", archive.display()))?;
     }
 
-    let temporary = archive.with_extension("download");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = archive.with_extension(format!(
+        "download-{}-{stamp}",
+        std::process::id()
+    ));
     if temporary.exists() {
         fs::remove_file(&temporary)?;
     }
-    let download_result = (|| -> Result<()> {
-        run_checked(
-            Command::new("curl")
-                .args(["--fail", "--location", "--retry", "3", "--silent", "--show-error", "--output"])
-                .arg(&temporary)
-                .arg(url),
-        )?;
-        run_checked(Command::new("xz").arg("-t").arg(&temporary))?;
+
+    let result = (|| -> Result<()> {
+        download(&temporary)?;
+        validate(&temporary)
+            .with_context(|| format!("downloaded archive {} failed integrity validation", temporary.display()))?;
         fs::rename(&temporary, archive)
-            .with_context(|| format!("promoting verified archive to {}", archive.display()))?;
+            .with_context(|| format!("promoting validated archive to {}", archive.display()))?;
         Ok(())
     })();
-    if download_result.is_err() {
+    if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    download_result
+    result
+}
+
+fn ensure_kernel_archive(archive: &Path, url: &str) -> Result<()> {
+    ensure_archive_with(
+        archive,
+        |path| run_checked(Command::new("xz").arg("-t").arg(path)),
+        |temporary| {
+            if archive.exists() {
+                eprintln!(
+                    "Cached kernel archive {} failed integrity testing; downloading a fresh copy.",
+                    archive.display()
+                );
+            }
+            run_checked(
+                Command::new("curl")
+                    .args(["--fail", "--location", "--retry", "3", "--silent", "--show-error", "--output"])
+                    .arg(temporary)
+                    .arg(url),
+            )
+        },
+    )
 }
 
 fn kernel_release(source: &Path) -> Result<String> {
@@ -262,6 +281,17 @@ fn stage_kernel_boot_artifacts(
             )
         })?;
 
+    let image_size = fs::metadata(&image_source)
+        .with_context(|| format!("reading built kernel image metadata {}", image_source.display()))?
+        .len();
+    if image_size == 0 {
+        bail!("built kernel image is empty: {}", image_source.display());
+    }
+    let config_source = source.join(".config");
+    if !config_source.is_file() {
+        bail!("built kernel configuration is missing: {}", config_source.display());
+    }
+
     fs::create_dir_all(boot_dir)
         .with_context(|| format!("creating staged boot directory {}", boot_dir.display()))?;
 
@@ -275,10 +305,6 @@ fn stage_kernel_boot_artifacts(
         )
     })?;
 
-    let config_source = source.join(".config");
-    if !config_source.is_file() {
-        bail!("built kernel configuration is missing: {}", config_source.display());
-    }
     let config_destination = boot_dir.join(format!("config-{release}"));
     fs::copy(&config_source, &config_destination).with_context(|| {
         format!(
@@ -1541,6 +1567,68 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn staging_missing_config_does_not_publish_a_kernel_image() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-stage-missing-config-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        let source = root.join("source");
+        let boot = root.join("stage/boot");
+        let image = source.join("arch/x86/boot/bzImage");
+        fs::create_dir_all(image.parent().unwrap()).unwrap();
+        fs::write(&image, b"kernel image").unwrap();
+
+        assert!(stage_kernel_boot_artifacts(&source, &boot, "7.3.4-ko", "x86_64").is_err());
+        assert!(!boot.join("vmlinuz-7.3.4-ko").exists());
+        assert!(!boot.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staging_rejects_empty_kernel_images_before_creating_output() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-stage-empty-image-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        let source = root.join("source");
+        let boot = root.join("stage/boot");
+        let image = source.join("arch/x86/boot/bzImage");
+        fs::create_dir_all(image.parent().unwrap()).unwrap();
+        fs::write(&image, []).unwrap();
+        fs::write(source.join(".config"), "CONFIG_TEST=y\n").unwrap();
+
+        assert!(stage_kernel_boot_artifacts(&source, &boot, "7.3.4-ko", "x86_64").is_err());
+        assert!(!boot.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_image_verification_rejects_ambiguous_images() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-stage-ambiguous-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        let boot = root.join("boot");
+        fs::create_dir_all(&boot).unwrap();
+        fs::write(boot.join("vmlinuz-old"), b"old image").unwrap();
+        fs::write(boot.join("vmlinuz-other"), b"other image").unwrap();
+
+        assert!(verify_staged_kernel(&root, "7.3.4-ko").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn kernel_image_candidates_cover_all_declared_architectures() {
+        for architecture in ["x86_64", "x86", "aarch64", "arm", "riscv64", "powerpc64", "powerpc64le", "s390x"] {
+            assert!(!kernel_image_candidates(architecture).unwrap().is_empty());
+        }
+        assert!(kernel_image_candidates("mips64").is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn clean_source_refresh_refuses_symlink_source_directory() {
@@ -1576,5 +1664,107 @@ mod source_adapter_tests {
         for source in ["linux-zen", "linux-cachyos", "linux-tkg", "linux-rt"] {
             assert_eq!(release_moniker(source).unwrap(), "stable");
         }
+    }
+}
+
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-archive-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn validate_marker(path: &Path) -> Result<()> {
+        if fs::read(path)? == b"valid archive" {
+            Ok(())
+        } else {
+            bail!("archive marker did not match")
+        }
+    }
+
+    #[test]
+    fn valid_cached_archive_is_reused_without_downloading() {
+        let root = temp_root("cache-hit");
+        let archive = root.join("linux.tar.xz");
+        fs::write(&archive, b"valid archive").unwrap();
+        let downloads = AtomicUsize::new(0);
+
+        ensure_archive_with(
+            &archive,
+            validate_marker,
+            |_| {
+                downloads.fetch_add(1, Ordering::Relaxed);
+                fs::write(&archive, b"unexpected download")?;
+                Ok(())
+            },
+        ).unwrap();
+
+        assert_eq!(downloads.load(Ordering::Relaxed), 0);
+        assert_eq!(fs::read(&archive).unwrap(), b"valid archive");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_cached_archive_is_replaced_only_after_validation() {
+        let root = temp_root("cache-refresh");
+        let archive = root.join("linux.tar.xz");
+        fs::write(&archive, b"corrupt archive").unwrap();
+
+        ensure_archive_with(
+            &archive,
+            validate_marker,
+            |temporary| {
+                fs::write(temporary, b"valid archive")?;
+                Ok(())
+            },
+        ).unwrap();
+
+        assert_eq!(fs::read(&archive).unwrap(), b"valid archive");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_download_does_not_leave_a_partial_archive() {
+        let root = temp_root("download-failure");
+        let archive = root.join("linux.tar.xz");
+        let result = ensure_archive_with(
+            &archive,
+            validate_marker,
+            |_| bail!("simulated network failure"),
+        );
+
+        assert!(result.is_err());
+        assert!(!archive.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_download_validation_removes_the_temporary_file() {
+        let root = temp_root("validation-failure");
+        let archive = root.join("linux.tar.xz");
+        let result = ensure_archive_with(
+            &archive,
+            validate_marker,
+            |temporary| {
+                fs::write(temporary, b"truncated archive")?;
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!archive.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
     }
 }
