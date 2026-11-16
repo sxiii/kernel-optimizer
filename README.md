@@ -14,7 +14,7 @@ not automated.
 
 **Implemented**
 
-- [x] Hardware inventory, workload-aware read-only recommendations, and an interactive terminal dashboard.
+- [x] Hardware inventory, workload-aware read-only recommendations, read-only firmware/bootloader/ESP/boot-entry inventory, and an interactive terminal dashboard.
 - [x] Six kernel sources: upstream stable, upstream LTS, Zen, CachyOS, TKG and PREEMPT_RT, with each source's trust limitations recorded.
 - [x] Configurable kernel builds, source/patch verification, staged image validation, and machine-readable provenance.
 - [x] Read-only build preflight for profile settings, dependencies, config source, signer keys and disk space.
@@ -22,21 +22,20 @@ not automated.
 - [x] CPU, memory, optional fio/iperf3 benchmarks and validated JSON report comparison.
 - [x] Arch/Garuda pacman package creation and separately authorized installation; initramfs generation is delegated to the detected active pacman hook.
 - [x] Native desktop GUI, CLI/TUI workflows, selectable activity logs, copy/save controls, and PolicyKit-gated privileged actions.
-- [x] Hardware-independent regression tests and GitHub Actions lint/test checks, including a temporary-keyring GPG signature test that rejects altered archives.
+- [x] Hardware-independent regression tests and GitHub Actions lint/test checks, including isolated-keyring GPG signature verification and rollback/cache/staging/benchmark edge cases.
 
 **Next**
 
 - [x] End-to-end kernel archive signature verification test using an isolated temporary GPG keyring, a generated test signer and a tampered-archive rejection case.
-- [ ] Add a clean disposable Arch/Garuda package-build integration test.
-- [ ] Validate builds and tuning on Debian/Ubuntu and Fedora, plus additional supported kernel configurations.
+- [x] Build and inspect a real pacman package in a clean Arch container as an unprivileged user (GitHub Actions).
+- [ ] Validate full kernel builds and tuning on Debian/Ubuntu and Fedora, plus additional supported kernel configurations. Application compile/lint/test smoke jobs are being added for Debian and Fedora.
 - [ ] Add module-signing support and a complete Secure Boot signing/enrollment workflow; current install checks fail closed when Secure Boot is enabled or uncertain.
-- [ ] Add bootloader detection and read-only boot-entry inventory, then design safe entry creation with a preserved known-good fallback and tested rollback.
+- [x] Detect firmware mode, standard bootloader installations, boot menu entries, EFI boot variables and mounted ESP/boot filesystems without changing them.\n- [ ] Design safe boot-entry creation with a preserved known-good fallback and tested rollback.
 - [ ] Add reproducible hardware-specific benchmark suites only where the workload and limitations can be documented.
 
 The application can create and install a kernel package as a separate, explicit action.
 It does not create or modify GRUB/systemd-boot entries, enroll Secure Boot keys, or
-replace the currently bootable kernel. A staged or installed kernel is not proof that
-a machine can boot it; retain a known-good boot entry until the new one has been tested.
+replace the currently bootable kernel. The boot inventory is heuristic and may be incomplete in containers or custom layouts. A staged or installed kernel is not proof that a machine can boot it; retain a known-good boot entry until the new one has been tested.
 
 ## Requirements
 
