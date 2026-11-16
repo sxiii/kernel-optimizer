@@ -3,10 +3,12 @@ use clap::{Parser, Subcommand};
 mod tuning;
 use tuning::Workload;
 mod hardware;
+mod boot;
 mod benchmark;
 mod recommendations;
 mod tui;
 mod provenance;
+mod source_adapters;
 mod arch_package;
 mod gui;
 use regex::Regex;
@@ -107,6 +109,7 @@ struct Profile {
     config_base: String, compiler: String, optimization: String,
     use_mold: bool, ccache: bool, build_dir: PathBuf, stage_dir: PathBuf,
     enable_lto: bool, enable_bpf: bool, menuconfig: bool,
+    allow_unverified_sources: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     gpg_home: Option<PathBuf>,
 }
@@ -117,7 +120,7 @@ impl Default for Profile {
         config_base:"current".into(), compiler:"gcc".into(), optimization:"native".into(),
         use_mold:false, ccache:true, build_dir:PathBuf::from("/var/tmp/kernel-optimizer/build"),
         stage_dir:PathBuf::from("/var/tmp/kernel-optimizer/stage"),
-        enable_lto:false, enable_bpf:true, menuconfig:false, gpg_home:None,
+        enable_lto:false, enable_bpf:true, menuconfig:false, allow_unverified_sources:false, gpg_home:None,
     }}
 }
 
@@ -135,11 +138,11 @@ fn sources() {
     println!("SOURCE            STATUS       TRACK / PURPOSE");
     println!("linux             SUPPORTED    Latest stable upstream kernel (kernel.org; signed tarball)");
     println!("linux-lts          SUPPORTED    Latest longterm upstream kernel (kernel.org; signed tarball)");
-    println!("linux-zen          PLANNED      Zen patchset (requires pinned signed source adapter)");
-    println!("linux-cachyos      PLANNED      CachyOS patch/config track (requires audited patch manifest)");
-    println!("linux-tkg          PLANNED      TKG framework (scripts are not executed by this builder)");
-    println!("linux-rt           PLANNED      PREEMPT_RT patchset (requires separate signer validation)");
-    println!("\nOnly SUPPORTED tracks can be built. Planned tracks remain visible but fail closed until their source and patch provenance can be verified.");
+    println!("linux-zen          SUPPORTED    Kernel.org base + signed Zen patch");
+    println!("linux-rt           SUPPORTED    Kernel.org base + signed PREEMPT_RT patch");
+    println!("linux-cachyos      OPT-IN       CachyOS release archive; explicit unverified-source opt-in required");
+    println!("linux-tkg          OPT-IN       Pinned TKG EEVDF patch subset; explicit unverified-source opt-in required");
+    println!("\nCachyOS and TKG require allow_unverified_sources = true and are excluded from verified package builds.");
 }
 fn profile(file:&Path,create:bool)->Result<()> {
     if create { let p=toml::to_string_pretty(&Profile::default())?; fs::write(file,p).with_context(||format!("writing {}",file.display()))?; println!("Created {}",file.display()); }
@@ -164,48 +167,68 @@ fn release_moniker(source: &str)->Result<&'static str> {
     match source {
         "linux" => Ok("stable"),
         "linux-lts" => Ok("longterm"),
-        other => bail!("source '{other}' does not yet have a verified source adapter; currently buildable sources are linux and linux-lts"),
+        "linux-zen" | "linux-cachyos" | "linux-tkg" | "linux-rt" => Ok("stable"),
+        other => bail!("unknown kernel source '{other}'"),
     }
 }
-fn ensure_kernel_archive(archive: &Path, url: &str) -> Result<()> {
-    let cached_is_valid = archive.exists()
-        && Command::new("xz")
-            .arg("-t")
-            .arg(archive)
-            .status()
-            .is_ok_and(|status| status.success());
-    if cached_is_valid {
-        return Ok(());
-    }
-    if archive.exists() {
+fn ensure_archive_with(
+    archive: &Path,
+    mut validate: impl FnMut(&Path) -> Result<()>,
+    mut download: impl FnMut(&Path) -> Result<()>,
+) -> Result<()> {
+    if archive.is_file() {
+        if validate(archive).is_ok() {
+            return Ok(());
+        }
         eprintln!(
-            "Cached kernel archive {} failed integrity testing; downloading a fresh copy.",
+            "Cached archive {} failed integrity validation; downloading a fresh copy.",
             archive.display()
         );
+    }
+    if archive.exists() {
         fs::remove_file(archive)
-            .with_context(|| format!("removing invalid archive {}", archive.display()))?;
+            .with_context(|| format!("removing invalid cached archive {}", archive.display()))?;
     }
 
-    let temporary = archive.with_extension("download");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = archive.with_extension(format!(
+        "download-{}-{stamp}",
+        std::process::id()
+    ));
     if temporary.exists() {
         fs::remove_file(&temporary)?;
     }
-    let download_result = (|| -> Result<()> {
-        run_checked(
-            Command::new("curl")
-                .args(["--fail", "--location", "--retry", "3", "--output"])
-                .arg(&temporary)
-                .arg(url),
-        )?;
-        run_checked(Command::new("xz").arg("-t").arg(&temporary))?;
+
+    let result = (|| -> Result<()> {
+        download(&temporary)?;
+        validate(&temporary)
+            .with_context(|| format!("downloaded archive {} failed integrity validation", temporary.display()))?;
         fs::rename(&temporary, archive)
-            .with_context(|| format!("promoting verified archive to {}", archive.display()))?;
+            .with_context(|| format!("promoting validated archive to {}", archive.display()))?;
         Ok(())
     })();
-    if download_result.is_err() {
+    if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    download_result
+    result
+}
+
+fn ensure_kernel_archive(archive: &Path, url: &str) -> Result<()> {
+    ensure_archive_with(
+        archive,
+        |path| run_checked(Command::new("xz").arg("-t").arg(path)),
+        |temporary| {
+            run_checked(
+                Command::new("curl")
+                    .args(["--fail", "--location", "--retry", "3", "--silent", "--show-error", "--output"])
+                    .arg(temporary)
+                    .arg(url),
+            )
+        },
+    )
 }
 
 fn kernel_release(source: &Path) -> Result<String> {
@@ -259,6 +282,17 @@ fn stage_kernel_boot_artifacts(
             )
         })?;
 
+    let image_size = fs::metadata(&image_source)
+        .with_context(|| format!("reading built kernel image metadata {}", image_source.display()))?
+        .len();
+    if image_size == 0 {
+        bail!("built kernel image is empty: {}", image_source.display());
+    }
+    let config_source = source.join(".config");
+    if !config_source.is_file() {
+        bail!("built kernel configuration is missing: {}", config_source.display());
+    }
+
     fs::create_dir_all(boot_dir)
         .with_context(|| format!("creating staged boot directory {}", boot_dir.display()))?;
 
@@ -272,10 +306,6 @@ fn stage_kernel_boot_artifacts(
         )
     })?;
 
-    let config_source = source.join(".config");
-    if !config_source.is_file() {
-        bail!("built kernel configuration is missing: {}", config_source.display());
-    }
     let config_destination = boot_dir.join(format!("config-{release}"));
     fs::copy(&config_source, &config_destination).with_context(|| {
         format!(
@@ -353,6 +383,10 @@ fn verify_staged_kernel(stage: &Path, release: &str) -> Result<(String, String, 
 fn validate_profile(p: &Profile) -> Result<()> {
     if !(1..=4096).contains(&p.jobs) { bail!("jobs must be between 1 and 4096"); }
     let _ = release_moniker(&p.source)?;
+    if matches!(p.source.as_str(), "linux-cachyos" | "linux-tkg") && !p.allow_unverified_sources {
+        bail!("{} requires allow_unverified_sources = true; its source material does not meet the pinned detached-signature policy",
+            if p.source == "linux-cachyos" { "CachyOS" } else { "Linux TKG" });
+    }
     if p.version != "stable" && p.version != "longterm" && !Regex::new(r"^\d+\.\d+(\.\d+)?$")?.is_match(&p.version) { bail!("invalid kernel version: {}", p.version); }
     if p.local_version.contains('/') || p.local_version.contains(' ') || p.local_version.contains('\n') { bail!("local_version may not contain slash, spaces or newlines"); }
     if !matches!(p.config_base.as_str(), "current" | "defconfig") { bail!("unsupported config_base '{}' (use current or defconfig)", p.config_base); }
@@ -399,7 +433,22 @@ fn doctor(profile_path: &Path) -> Result<()> {
     println!("Kernel build preflight (read-only)\nProfile: {}", if profile_loaded { profile_path.display().to_string() } else { "built-in defaults".into() });
     let mut failures = 0usize;
     let mut warnings = 0usize;
-    let required = ["make", "curl", "xz", "tar", "gpg", "bc", "bison", "flex", "perl", "python3"];
+    let mut required = vec!["make", "curl", "xz", "tar", "gpg", "bc", "bison", "flex", "perl", "python3"];
+    if matches!(p.source.as_str(), "linux-zen" | "linux-tkg") {
+        required.push("patch");
+    }
+    if matches!(p.source.as_str(), "linux-tkg") {
+        required.push("git");
+    }
+    if matches!(p.source.as_str(), "linux-zen") {
+        required.push("zstd");
+    }
+    if matches!(p.source.as_str(), "linux-cachyos") {
+        required.push("gzip");
+    }
+    if matches!(p.source.as_str(), "linux-rt") {
+        required.push("patch");
+    }
     for tool in required {
         if command_available(tool) { println!("[ ok ] {tool} available"); }
         else { println!("[FAIL] {tool} not found in PATH"); failures += 1; }
@@ -414,6 +463,19 @@ fn doctor(profile_path: &Path) -> Result<()> {
         Ok(Some(name)) => println!("[ ok ] pinned kernel.org signer key available in GPG keyring ({name})"),
         Ok(None) => { println!("[WARN] no pinned kernel.org signer key found in GPG keyring; import and verify a documented key before building"); warnings += 1; }
         Err(error) => { println!("[WARN] could not inspect GPG keyring: {error}"); warnings += 1; }
+    }
+
+    let patch_signer = match p.source.as_str() {
+        "linux-zen" => Some(("Linux Zen", "83BC8889351B5DEBBB68416EB8AC08600F108CDF")),
+        "linux-rt" => Some(("PREEMPT_RT", "64254695FFF0AA4466CC19E67B96E8162A8CF5D1")),
+        _ => None,
+    };
+    if let Some((name, fingerprint)) = patch_signer {
+        match provenance::fingerprint_available(p.gpg_home.as_deref(), fingerprint) {
+            Ok(true) => println!("[ ok ] pinned {name} patch signer key available"),
+            Ok(false) => { println!("[WARN] pinned {name} patch signer key {fingerprint} is missing from the configured GPG keyring"); warnings += 1; }
+            Err(error) => { println!("[WARN] could not inspect {name} patch signer key: {error}"); warnings += 1; }
+        }
     }
     if command_available("pahole") { println!("[ ok ] pahole available"); }
     else { println!("[WARN] pahole missing; BTF-enabled kernel configurations may fail"); warnings += 1; }
@@ -472,6 +534,16 @@ fn download_signature(path: &Path, url: &str) -> Result<()> {
 // Re-extract the signed source archive on every build. Only the previous .config is
 // retained; local edits to source files cannot silently survive outside the signature.
 fn refresh_source_tree(archive: &Path, source: &Path, build_dir: &Path, version: &str) -> Result<bool> {
+    refresh_source_tree_with_layout(archive, source, build_dir, version, false)
+}
+
+fn refresh_source_tree_with_layout(
+    archive: &Path,
+    source: &Path,
+    build_dir: &Path,
+    version: &str,
+    strip_components: bool,
+) -> Result<bool> {
     let source_metadata = match fs::symlink_metadata(source) {
         Ok(metadata) => Some(metadata),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -493,23 +565,30 @@ fn refresh_source_tree(archive: &Path, source: &Path, build_dir: &Path, version:
     if temporary.exists() {
         fs::remove_dir_all(&temporary)?;
     }
-    fs::create_dir(&temporary)?;
-    let extraction = run_checked(
-        Command::new("tar")
-            .args(["--extract", "--file"])
-            .arg(archive)
-            .arg("--directory")
-            .arg(&temporary)
-            .args(["--no-same-owner", "--no-same-permissions"]),
-    );
+    let extraction_root = temporary.join("payload");
+    fs::create_dir_all(&extraction_root)?;
+    let mut tar = Command::new("tar");
+    tar.args(["--extract", "--file"])
+        .arg(archive)
+        .arg("--directory")
+        .arg(&extraction_root)
+        .args(["--no-same-owner", "--no-same-permissions"]);
+    if strip_components {
+        tar.arg("--strip-components=1");
+    }
+    let extraction = run_checked(&mut tar);
     if let Err(error) = extraction {
         let _ = fs::remove_dir_all(&temporary);
         return Err(error).context("extracting signed kernel source archive");
     }
-    let extracted_root = temporary.join(format!("linux-{version}"));
-    if !extracted_root.is_dir() {
+    let extracted_root = if strip_components {
+        extraction_root.clone()
+    } else {
+        extraction_root.join(format!("linux-{version}"))
+    };
+    if !extracted_root.is_dir() || !extracted_root.join("Makefile").is_file() {
         let _ = fs::remove_dir_all(&temporary);
-        bail!("signed archive did not contain expected top-level directory linux-{version}");
+        bail!("source archive does not contain the expected kernel source tree");
     }
     let backup = build_dir.join(format!(".kernel-optimizer-old-source-{}-{stamp}", std::process::id()));
     let had_source = source_metadata.is_some();
@@ -563,6 +642,7 @@ struct SourceProvenance {
     signature_hash_algorithm: String,
     signer_name: String,
     signer_primary_fingerprint: String,
+    patches: Vec<source_adapters::PatchProvenance>,
     gpg_version: Option<String>,
     xz_version: Option<String>,
     curl_version: Option<String>,
@@ -630,45 +710,104 @@ struct BuildManifest {
 fn build(profile_path:&Path,dry:bool)->Result<()> {
     let mut p:Profile=toml::from_str(&fs::read_to_string(profile_path)?)?;
     validate_profile(&p)?;
-    if p.version=="stable" || p.version=="longterm" {
+    let source_plan = source_adapters::resolve(&p.source, &p.version, p.allow_unverified_sources)
+        .context("resolving selected kernel source")?;
+    if let Some(plan) = source_plan.as_ref() {
+        p.version = plan.version.clone();
+    } else if p.version=="stable" || p.version=="longterm" {
         let moniker = release_moniker(&p.source)?;
         p.version=latest_release(moniker)?;
     }
+
     let src=p.build_dir.join(format!("linux-{}",p.version));
-    let archive=p.build_dir.join(format!("linux-{}.tar.xz",p.version));
-    let signature=p.build_dir.join(format!("linux-{}.tar.sign",p.version));
-    let major=p.version.split('.').next().context("kernel version has no major component")?;
-    let url=format!("https://cdn.kernel.org/pub/linux/kernel/v{major}.x/linux-{}.tar.xz",p.version);
-    let signature_url=format!("https://cdn.kernel.org/pub/linux/kernel/v{major}.x/linux-{}.tar.sign",p.version);
+    let (url, archive_name, signature_url, signature_name, archive_format) =
+        if let Some(plan) = source_plan.as_ref() {
+            (plan.archive_url.clone(), plan.archive_name.clone(),
+             plan.signature_url.clone(), plan.signature_name.clone(), plan.archive_format)
+        } else {
+            let major=p.version.split('.').next().context("kernel version has no major component")?;
+            let base=format!("https://cdn.kernel.org/pub/linux/kernel/v{major}.x");
+            (format!("{base}/linux-{}.tar.xz",p.version),
+             format!("linux-{}.tar.xz",p.version),
+             Some(format!("{base}/linux-{}.tar.sign",p.version)),
+             Some(format!("linux-{}.tar.sign",p.version)),
+             source_adapters::ArchiveFormat::KernelXz)
+        };
+    let archive=p.build_dir.join(&archive_name);
+    let signature=signature_name.as_ref().map(|name| p.build_dir.join(name));
+    let signature_url_text=signature_url.clone().unwrap_or_default();
+
     println!("Kernel: {}{}",p.version,p.local_version);
+    println!("Source: {}", source_plan.as_ref().map(|plan| plan.project.as_str()).unwrap_or("Linux kernel.org"));
     println!("CPU: {}",hardware::detect().cpu.model);
     println!("Jobs: {}",p.jobs);
     println!("Compiler: {} (ccache: {}, mold requested: {})",p.compiler,p.ccache,p.use_mold);
     println!("Optimization profile: {} (currently informational; no unsafe CPU-specific flags injected)",p.optimization);
-    println!("Source: {url}");
-    println!("Signature: {signature_url}");
+    println!("Source archive: {url}");
+    if let Some(signature_url) = signature_url.as_deref() { println!("Signature: {signature_url}"); }
+    if let Some(plan) = source_plan.as_ref() {
+        println!("Source provenance: {}", plan.trust_reference);
+        if !matches!(p.source.as_str(), "linux-zen" | "linux-rt") {
+            println!("WARNING: this source track is not independently signature-verified; it cannot be packaged by the verified Arch package workflow.");
+        }
+    }
     println!("Build dir: {}",src.display());
     if dry {println!("Dry run only. No files changed.");return Ok(());}
+
     fs::create_dir_all(&p.build_dir)?;
     let started_unix=unix_timestamp();
     let build_timer=Instant::now();
-    ensure_kernel_archive(&archive, &url)?;
-    download_signature(&signature, &signature_url)?;
+    match archive_format {
+        source_adapters::ArchiveFormat::KernelXz => ensure_kernel_archive(&archive, &url)?,
+        source_adapters::ArchiveFormat::GzipTar => {
+            download_signature(&archive, &url)?;
+            run_checked(Command::new("gzip").arg("-t").arg(&archive))?;
+        }
+    }
     let archive_sha256_before=provenance::sha256_file(&archive)?;
-    let signature_sha256_before=provenance::sha256_file(&signature)?;
-    let signature_verification=provenance::verify_kernel_archive(&archive,&signature,p.gpg_home.as_deref())?;
-    let archive_sha256=provenance::sha256_file(&archive)?;
-    let signature_sha256=provenance::sha256_file(&signature)?;
-    if archive_sha256 != archive_sha256_before || signature_sha256 != signature_sha256_before {
+    if let (Some(signature_path), Some(signature_url)) = (signature.as_deref(), signature_url.as_deref()) {
+        download_signature(signature_path, signature_url)?;
+    }
+    let signature_sha256_before=signature.as_deref().map(provenance::sha256_file).transpose()?;
+    let base_signature_verification = if let Some(signature_path) = signature.as_deref() {
+        Some(provenance::verify_kernel_archive(&archive,signature_path,p.gpg_home.as_deref())?)
+    } else {
+        None
+    };
+    let archive_sha256=source_adapters::verify_archive_digest(
+        &archive,
+        source_plan.as_ref().and_then(|plan| plan.expected_archive_sha256.as_deref()),
+    )?;
+    let signature_sha256=signature.as_deref().map(provenance::sha256_file).transpose()?.unwrap_or_default();
+    if archive_sha256 != archive_sha256_before
+        || signature_sha256_before.as_ref().is_some_and(|before| before != &signature_sha256)
+    {
         bail!("kernel archive or detached signature changed during verification; refusing to build");
     }
-    println!("Verified source signature by {} ({})",
-        signature_verification.signer_name,signature_verification.signer_primary_fingerprint);
-    let preserved_config=refresh_source_tree(&archive,&src,&p.build_dir,&p.version)?;
-    if provenance::sha256_file(&archive)? != archive_sha256 {
-        bail!("kernel archive changed after signature verification; refusing to build");
+    if let Some(verification) = base_signature_verification.as_ref() {
+        println!("Verified base source signature by {} ({})",
+            verification.signer_name,verification.signer_primary_fingerprint);
+    } else {
+        println!("Source archive digest matched the upstream GitHub release metadata; no trusted detached signature was available.");
     }
-    println!("Extracted a clean source tree from the signed archive{}.",
+
+    let preserved_config=if archive_format == source_adapters::ArchiveFormat::GzipTar {
+        refresh_source_tree_with_layout(&archive,&src,&p.build_dir,&p.version,true)?
+    } else {
+        refresh_source_tree(&archive,&src,&p.build_dir,&p.version)?
+    };
+    if provenance::sha256_file(&archive)? != archive_sha256 {
+        bail!("source archive changed after verification; refusing to build");
+    }
+    let patch_provenance = if let Some(plan) = source_plan.as_ref() {
+        source_adapters::download_and_apply_patches(plan, &src, &p.build_dir, p.gpg_home.as_deref())?
+    } else {
+        Vec::new()
+    };
+    if !patch_provenance.is_empty() {
+        println!("Applied {} source patch(es) with the configured provenance policy.", patch_provenance.len());
+    }
+    println!("Extracted a clean source tree{}.",
         if preserved_config { "; preserved the prior .config" } else { "" });
     let config=src.join(".config");
     let config_origin = if preserved_config {
@@ -738,10 +877,6 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     let make_version=provenance::command_version("make",&["--version"]);
     let compiler_version=provenance::command_version(&p.compiler,&["--version"]);
     let ccache_version=if p.ccache { provenance::command_version("ccache",&["--version"]) } else { None };
-    let gpg_version=provenance::command_version("gpg",&["--version"]);
-    let xz_version=provenance::command_version("xz",&["--version"]);
-    let curl_version=provenance::command_version("curl",&["--version"]);
-    let tar_version=provenance::command_version("tar",&["--version"]);
     let rustc_version=provenance::command_version("rustc",&["--version"]);
     run_checked(&mut make)?;
     fs::create_dir_all(&p.stage_dir)?;
@@ -770,34 +905,57 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     let host=hardware::detect();
     let mut recorded_profile=p.clone();
     recorded_profile.gpg_home=None;
+    let verified_source = base_signature_verification.is_some()
+        && patch_provenance.iter().all(|patch| patch.signature_verified);
+    let base_verification = base_signature_verification.as_ref();
     let source_manifest=SourceProvenance {
-        project:format!("Linux kernel.org {} track", if p.source == "linux-lts" { "longterm" } else { "stable" }),
+        project: source_plan.as_ref().map(|plan| plan.project.clone())
+            .unwrap_or_else(|| format!("Linux kernel.org {} track", if p.source == "linux-lts" { "longterm" } else { "stable" })),
         version:p.version.clone(),
-        archive_url:url,
+        archive_url:url.clone(),
         archive_sha256,
-        signature_url,
+        signature_url:signature_url_text,
         signature_sha256,
-        signature_verified:true,
-        signature_verification_method:"xz --decompress --stdout piped to gpg --no-options --batch --no-auto-key-import --no-auto-key-retrieve --status-fd=1 --verify".into(),
-        trust_reference:"https://www.kernel.org/signature.html".into(),
-        signature_creation_date:signature_verification.signature_creation_date,
-        signature_timestamp:signature_verification.signature_timestamp,
-        signature_public_key_algorithm:signature_verification.public_key_algorithm,
-        signature_hash_algorithm:signature_verification.hash_algorithm,
-        signer_name:signature_verification.signer_name,
-        signer_primary_fingerprint:signature_verification.signer_primary_fingerprint,
-        gpg_version,
-        xz_version,
-        curl_version,
-        tar_version,
+        signature_verified:verified_source,
+        signature_verification_method: if verified_source {
+            "kernel.org base archive signature plus all source patch signatures verified against pinned signer fingerprints".into()
+        } else {
+            "NOT FULLY VERIFIED: explicit opt-in source or unsigned patch provenance; do not use for package installation".into()
+        },
+        trust_reference:source_plan.as_ref().map(|plan| plan.trust_reference.clone())
+            .unwrap_or_else(|| "https://www.kernel.org/signature.html".into()),
+        signature_creation_date:base_verification.map(|v| v.signature_creation_date.clone()).unwrap_or_default(),
+        signature_timestamp:base_verification.map(|v| v.signature_timestamp.clone()).unwrap_or_default(),
+        signature_public_key_algorithm:base_verification.map(|v| v.public_key_algorithm.clone()).unwrap_or_default(),
+        signature_hash_algorithm:base_verification.map(|v| v.hash_algorithm.clone()).unwrap_or_default(),
+        signer_name:base_verification.map(|v| v.signer_name.clone()).unwrap_or_else(|| "not independently verified".into()),
+        signer_primary_fingerprint:base_verification.map(|v| v.signer_primary_fingerprint.clone()).unwrap_or_default(),
+        patches:patch_provenance,
+        gpg_version:provenance::command_version("gpg",&["--version"]),
+        xz_version:provenance::command_version("xz",&["--version"]),
+        curl_version:provenance::command_version("curl",&["--version"]),
+        tar_version:provenance::command_version("tar",&["--version"]),
     };
     let compiler_command=if p.ccache { format!("ccache {}",p.compiler) } else { p.compiler.clone() };
     let mut recorded_commands=vec![
-        "curl --fail --location --retry 3 (download kernel.org archive and detached signature)".into(),
-        "xz -t <archive>".into(),
-        "xz --decompress --stdout <archive> | gpg --no-options --batch --no-auto-key-import --no-auto-key-retrieve --no-auto-key-locate --status-fd=1 --verify <signature> -".into(),
-        "tar --extract --file <signature-verified archive> --no-same-owner --no-same-permissions".into(),
+        format!("curl --fail --location --retry 3 (download source archive from {url})"),
+        match (signature_url.as_deref(), source_plan.as_ref().and_then(|plan| plan.expected_archive_sha256.as_deref())) {
+            (Some(_), _) => "verify base archive detached signature against the pinned signer allowlist".into(),
+            (None, Some(_)) => "verify source archive SHA-256 against the digest advertised by the upstream GitHub release".into(),
+            (None, None) => "no detached source signature or upstream digest was available".into(),
+        },
+        if archive_format == source_adapters::ArchiveFormat::GzipTar {
+            "gzip -t <source archive>; extract with --strip-components=1".into()
+        } else {
+            "xz -t <source archive>; extract the signed kernel.org source archive".into()
+        },
     ];
+    for patch in &source_manifest.patches {
+        recorded_commands.push(format!(
+            "download and apply source patch {} (sha256 {}; signature verified: {}; Git blob: {})",
+            patch.name, patch.sha256, patch.signature_verified, patch.git_blob_sha1
+        ));
+    }
     if config_origin == "defconfig" || config_origin == "defconfig_fallback" {
         recorded_commands.push("make defconfig".into());
     }
@@ -853,7 +1011,7 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
         modules_total_bytes,
     };
     let manifest=BuildManifest {
-        schema_version:2,
+        schema_version:3,
         generated_unix:completed_unix,
         application_version:env!("CARGO_PKG_VERSION"),
         source:source_manifest,
@@ -863,8 +1021,8 @@ fn build(profile_path:&Path,dry:bool)->Result<()> {
     };
     provenance::write_json_atomic(&p.stage_dir.join("provenance.json"),&manifest)?;
     let metadata = format!(
-        "version={}\nlocalversion={}\nkernel_release={}\nsource={}\nsource_signature_verified=true\nsource_signer={}\nsource_signer_fingerprint={}\nsource_archive_sha256={}\nsource_signature_sha256={}\neffective_config_sha256={}\nkernel_image={}\nkernel_image_sha256={}\nmodules_staged={}\nprovenance=provenance.json\n",
-        p.version, p.local_version, release, p.source,
+        "version={}\nlocalversion={}\nkernel_release={}\nsource={}\nsource_signature_verified={}\nsource_signer={}\nsource_signer_fingerprint={}\nsource_archive_sha256={}\nsource_signature_sha256={}\neffective_config_sha256={}\nkernel_image={}\nkernel_image_sha256={}\nmodules_staged={}\nprovenance=provenance.json\n",
+        p.version, p.local_version, release, p.source, manifest.source.signature_verified,
         manifest.source.signer_name,manifest.source.signer_primary_fingerprint,
         manifest.source.archive_sha256,manifest.source.signature_sha256,
         effective_config_sha256,image_name,image_sha256,modules_staged
@@ -932,6 +1090,9 @@ fn finalize(profile_path: &Path, version_override: Option<&str>) -> Result<()> {
             .with_context(|| format!("reading build profile {}", profile_path.display()))?
     )?;
     validate_profile(&p)?;
+    if !matches!(p.source.as_str(), "linux" | "linux-lts") {
+        bail!("metadata recovery currently supports only Linux stable/LTS. Variant sources require re-verifying their exact patch assets; rebuild the selected variant to recreate complete provenance.");
+    }
 
     let version = infer_finalize_version(&p, version_override)?;
     p.version = version.clone();
@@ -1069,6 +1230,7 @@ fn finalize(profile_path: &Path, version_override: Option<&str>) -> Result<()> {
         signature_url,
         signature_sha256,
         signature_verified: true,
+        patches: Vec::new(),
         signature_verification_method: "re-verified during metadata recovery: xz --decompress --stdout piped to gpg --no-options --batch --no-auto-key-import --no-auto-key-retrieve --no-auto-key-locate --status-fd=1 --verify".into(),
         trust_reference: "https://www.kernel.org/signature.html".into(),
         signature_creation_date: signature_verification.signature_creation_date,
@@ -1142,7 +1304,7 @@ fn finalize(profile_path: &Path, version_override: Option<&str>) -> Result<()> {
     };
 
     let manifest = BuildManifest {
-        schema_version: 2,
+        schema_version: 3,
         generated_unix,
         application_version: env!("CARGO_PKG_VERSION"),
         source: source_manifest,
@@ -1289,6 +1451,18 @@ mod tests {
             source: "linux-zen".into(),
             ..Profile::default()
         };
+        assert!(validate_profile(&profile).is_ok());
+        let profile = Profile { source: "linux-tkg".into(), ..Profile::default() };
+        assert!(validate_profile(&profile).is_err());
+        let profile = Profile { source: "linux-tkg".into(), allow_unverified_sources: true, ..Profile::default() };
+        assert!(validate_profile(&profile).is_ok());
+        let profile = Profile { source: "linux-cachyos".into(), ..Profile::default() };
+        assert!(validate_profile(&profile).is_err());
+        assert_eq!(release_moniker("linux-zen").unwrap(), "stable");
+        assert_eq!(release_moniker("linux-rt").unwrap(), "stable");
+        assert_eq!(release_moniker("linux-cachyos").unwrap(), "stable");
+        assert_eq!(release_moniker("linux-tkg").unwrap(), "stable");
+        let profile = Profile { source: "unknown".into(), ..Profile::default() };
         assert!(validate_profile(&profile).is_err());
     }
 
@@ -1394,6 +1568,68 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn staging_missing_config_does_not_publish_a_kernel_image() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-stage-missing-config-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        let source = root.join("source");
+        let boot = root.join("stage/boot");
+        let image = source.join("arch/x86/boot/bzImage");
+        fs::create_dir_all(image.parent().unwrap()).unwrap();
+        fs::write(&image, b"kernel image").unwrap();
+
+        assert!(stage_kernel_boot_artifacts(&source, &boot, "7.3.4-ko", "x86_64").is_err());
+        assert!(!boot.join("vmlinuz-7.3.4-ko").exists());
+        assert!(!boot.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staging_rejects_empty_kernel_images_before_creating_output() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-stage-empty-image-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        let source = root.join("source");
+        let boot = root.join("stage/boot");
+        let image = source.join("arch/x86/boot/bzImage");
+        fs::create_dir_all(image.parent().unwrap()).unwrap();
+        fs::write(&image, []).unwrap();
+        fs::write(source.join(".config"), "CONFIG_TEST=y\n").unwrap();
+
+        assert!(stage_kernel_boot_artifacts(&source, &boot, "7.3.4-ko", "x86_64").is_err());
+        assert!(!boot.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_image_verification_rejects_ambiguous_images() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-stage-ambiguous-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        let boot = root.join("boot");
+        fs::create_dir_all(&boot).unwrap();
+        fs::write(boot.join("vmlinuz-old"), b"old image").unwrap();
+        fs::write(boot.join("vmlinuz-other"), b"other image").unwrap();
+
+        assert!(verify_staged_kernel(&root, "7.3.4-ko").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn kernel_image_candidates_cover_all_declared_architectures() {
+        for architecture in ["x86_64", "x86", "aarch64", "arm", "riscv64", "powerpc64", "powerpc64le", "s390x"] {
+            assert!(!kernel_image_candidates(architecture).unwrap().is_empty());
+        }
+        assert!(kernel_image_candidates("mips64").is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn clean_source_refresh_refuses_symlink_source_directory() {
@@ -1427,7 +1663,109 @@ mod source_adapter_tests {
         assert_eq!(release_moniker("linux").unwrap(), "stable");
         assert_eq!(release_moniker("linux-lts").unwrap(), "longterm");
         for source in ["linux-zen", "linux-cachyos", "linux-tkg", "linux-rt"] {
-            assert!(release_moniker(source).is_err());
+            assert_eq!(release_moniker(source).unwrap(), "stable");
         }
+    }
+}
+
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-archive-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn validate_marker(path: &Path) -> Result<()> {
+        if fs::read(path)? == b"valid archive" {
+            Ok(())
+        } else {
+            bail!("archive marker did not match")
+        }
+    }
+
+    #[test]
+    fn valid_cached_archive_is_reused_without_downloading() {
+        let root = temp_root("cache-hit");
+        let archive = root.join("linux.tar.xz");
+        fs::write(&archive, b"valid archive").unwrap();
+        let downloads = AtomicUsize::new(0);
+
+        ensure_archive_with(
+            &archive,
+            validate_marker,
+            |_| {
+                downloads.fetch_add(1, Ordering::Relaxed);
+                fs::write(&archive, b"unexpected download")?;
+                Ok(())
+            },
+        ).unwrap();
+
+        assert_eq!(downloads.load(Ordering::Relaxed), 0);
+        assert_eq!(fs::read(&archive).unwrap(), b"valid archive");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_cached_archive_is_replaced_only_after_validation() {
+        let root = temp_root("cache-refresh");
+        let archive = root.join("linux.tar.xz");
+        fs::write(&archive, b"corrupt archive").unwrap();
+
+        ensure_archive_with(
+            &archive,
+            validate_marker,
+            |temporary| {
+                fs::write(temporary, b"valid archive")?;
+                Ok(())
+            },
+        ).unwrap();
+
+        assert_eq!(fs::read(&archive).unwrap(), b"valid archive");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_download_does_not_leave_a_partial_archive() {
+        let root = temp_root("download-failure");
+        let archive = root.join("linux.tar.xz");
+        let result = ensure_archive_with(
+            &archive,
+            validate_marker,
+            |_| bail!("simulated network failure"),
+        );
+
+        assert!(result.is_err());
+        assert!(!archive.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_download_validation_removes_the_temporary_file() {
+        let root = temp_root("validation-failure");
+        let archive = root.join("linux.tar.xz");
+        let result = ensure_archive_with(
+            &archive,
+            validate_marker,
+            |temporary| {
+                fs::write(temporary, b"truncated archive")?;
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!archive.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
     }
 }

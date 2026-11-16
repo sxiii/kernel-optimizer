@@ -242,6 +242,91 @@ fn restore_file(path: &str, previous: Option<&str>) -> Result<()> {
     }
 }
 
+fn rollback_managed_files(
+    sysctl_path: &str,
+    udev_path: &str,
+    previous_sysctl: Option<&str>,
+    previous_udev: Option<&str>,
+    reload_sysctl: &mut impl FnMut() -> Result<()>,
+    reload_udev: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    if let Err(error) = restore_file(sysctl_path, previous_sysctl) {
+        failures.push(format!("restoring {sysctl_path}: {error:#}"));
+    }
+    if let Err(error) = restore_file(udev_path, previous_udev) {
+        failures.push(format!("restoring {udev_path}: {error:#}"));
+    }
+    if let Err(error) = reload_sysctl() {
+        failures.push(format!("reloading sysctl after rollback: {error:#}"));
+    }
+    if let Err(error) = reload_udev() {
+        failures.push(format!("reloading udev after rollback: {error:#}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("rollback was incomplete: {}", failures.join("; "));
+    }
+}
+
+fn apply_managed_files_with_reloader(
+    sysctl_path: &str,
+    udev_path: &str,
+    sysctl_contents: &str,
+    udev_contents: &str,
+    mut reload_sysctl: impl FnMut() -> Result<()>,
+    mut reload_udev: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    let previous_sysctl = previous_file(sysctl_path)?;
+    let previous_udev = previous_file(udev_path)?;
+
+    write_atomic(sysctl_path, sysctl_contents)?;
+    if let Err(error) = write_atomic(udev_path, udev_contents) {
+        return match restore_file(sysctl_path, previous_sysctl.as_deref()) {
+            Ok(()) => Err(error).context("writing udev rules; restored the previous sysctl drop-in"),
+            Err(rollback_error) => Err(error).context(format!(
+                "writing udev rules failed and restoring the previous sysctl drop-in also failed: {rollback_error:#}"
+            )),
+        };
+    }
+
+    if let Err(error) = reload_sysctl() {
+        return match rollback_managed_files(
+            sysctl_path,
+            udev_path,
+            previous_sysctl.as_deref(),
+            previous_udev.as_deref(),
+            &mut reload_sysctl,
+            &mut reload_udev,
+        ) {
+            Ok(()) => Err(error).context("sysctl reload failed; restored the previous optimizer drop-ins"),
+            Err(rollback_error) => Err(error).context(format!(
+                "sysctl reload failed and rollback reported an error: {rollback_error:#}"
+            )),
+        };
+    }
+
+    if udev_contents.contains("ACTION==")
+        && let Err(error) = reload_udev()
+    {
+        return match rollback_managed_files(
+            sysctl_path,
+            udev_path,
+            previous_sysctl.as_deref(),
+            previous_udev.as_deref(),
+            &mut reload_sysctl,
+            &mut reload_udev,
+        ) {
+            Ok(()) => Err(error).context("udev rule reload failed; restored the previous optimizer drop-ins"),
+            Err(rollback_error) => Err(error).context(format!(
+                "udev rule reload failed and rollback reported an error: {rollback_error:#}"
+            )),
+        };
+    }
+    Ok(())
+}
+
 pub fn tune(profile: Workload, dry_run: bool) -> Result<()> {
     let (sysctl, notes) = render_sysctl(profile);
     let udev = render_udev();
@@ -250,50 +335,31 @@ pub fn tune(profile: Workload, dry_run: bool) -> Result<()> {
     if dry_run { println!("Dry run: no system files changed."); return Ok(()); }
     if !is_root() { bail!("applying system tuning requires root; rerun with sudo (or use --dry-run)"); }
 
-    let previous_sysctl = previous_file(SYSCTL_PATH)?;
-    let previous_udev = previous_file(UDEV_PATH)?;
     let backup = backup_sysctl()?;
     println!("Saved current sysctl state to {}", backup.display());
 
-    write_atomic(SYSCTL_PATH, &sysctl)?;
-    if let Err(error) = write_atomic(UDEV_PATH, &udev) {
-        restore_file(SYSCTL_PATH, previous_sysctl.as_deref())?;
-        return Err(error).context("writing udev rules; restored the previous sysctl drop-in");
-    }
-
-    // sysctl -e tolerates keys unavailable in this kernel. Restore the exact previous
-    // managed files if the reload cannot be started or reports failure.
-    let status = match Command::new("sysctl").args(["-e", "-p", SYSCTL_PATH]).status() {
-        Ok(status) => status,
-        Err(error) => {
-            restore_file(SYSCTL_PATH, previous_sysctl.as_deref())?;
-            restore_file(UDEV_PATH, previous_udev.as_deref())?;
-            let _ = Command::new("sysctl").arg("--system").status();
-            let _ = Command::new("udevadm").args(["control", "--reload-rules"]).status();
-            return Err(error).context("starting sysctl reload; restored previous optimizer drop-ins");
-        }
-    };
-    if !status.success() {
-        restore_file(SYSCTL_PATH, previous_sysctl.as_deref())?;
-        restore_file(UDEV_PATH, previous_udev.as_deref())?;
-        let _ = Command::new("sysctl").arg("--system").status();
-        let _ = Command::new("udevadm").args(["control", "--reload-rules"]).status();
-        bail!("sysctl reload failed; restored previous optimizer drop-ins and reloaded system settings");
-    }
-    if udev.contains("ACTION==") {
-        let reload = Command::new("udevadm")
-            .args(["control", "--reload-rules"])
-            .status();
-        if !matches!(reload, Ok(status) if status.success()) {
-            restore_file(SYSCTL_PATH, previous_sysctl.as_deref())?;
-            restore_file(UDEV_PATH, previous_udev.as_deref())?;
-            let _ = Command::new("sysctl").arg("--system").status();
-            let _ = Command::new("udevadm")
-                .args(["control", "--reload-rules"])
-                .status();
-            bail!("udevadm could not reload scheduler rules; restored the previous optimizer drop-ins");
-        }
-    }
+    apply_managed_files_with_reloader(
+        SYSCTL_PATH,
+        UDEV_PATH,
+        &sysctl,
+        &udev,
+        || {
+            let status = Command::new("sysctl").args(["-e", "-p", SYSCTL_PATH]).status()
+                .context("starting sysctl reload")?;
+            if !status.success() {
+                bail!("sysctl reload returned {status}");
+            }
+            Ok(())
+        },
+        || {
+            let status = Command::new("udevadm").args(["control", "--reload-rules"]).status()
+                .context("starting udev rule reload")?;
+            if !status.success() {
+                bail!("udevadm reload returned {status}");
+            }
+            Ok(())
+        },
+    )?;
     println!("Applied. Reboot is not required for sysctl values; scheduler rules apply to future device events.");
     Ok(())
 }
@@ -362,4 +428,121 @@ pub fn revert(dry_run: bool) -> Result<()> {
         "Optimizer drop-ins removed. This reloads the remaining sysctl files; it does not guarantee restoration of runtime changes made concurrently by other services."
     );
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_root(name: &str) -> PathBuf {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-tuning-{name}-{}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn path_string(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_without_leaving_temporary_files() {
+        let root = temp_root("atomic-write");
+        let target = root.join("nested/managed.conf");
+        let target_text = path_string(&target);
+        write_atomic(&target_text, "before\n").unwrap();
+        write_atomic(&target_text, "after\n").unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "after\n");
+        let entries = fs::read_dir(target.parent().unwrap()).unwrap().count();
+        assert_eq!(entries, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_sysctl_reload_restores_both_managed_files() {
+        let root = temp_root("sysctl-rollback");
+        let sysctl = root.join("sysctl.conf");
+        let udev = root.join("udev.rules");
+        fs::write(&sysctl, "previous sysctl\n").unwrap();
+        fs::write(&udev, "previous udev\n").unwrap();
+        let sysctl_text = path_string(&sysctl);
+        let udev_text = path_string(&udev);
+
+        let result = apply_managed_files_with_reloader(
+            &sysctl_text,
+            &udev_text,
+            "new sysctl\n",
+            "new udev\n",
+            || bail!("simulated sysctl reload failure"),
+            || Ok(()),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&sysctl).unwrap(), "previous sysctl\n");
+        assert_eq!(fs::read_to_string(&udev).unwrap(), "previous udev\n");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_udev_reload_restores_both_managed_files() {
+        let root = temp_root("udev-rollback");
+        let sysctl = root.join("sysctl.conf");
+        let udev = root.join("udev.rules");
+        fs::write(&sysctl, "previous sysctl\n").unwrap();
+        fs::write(&udev, "previous udev\n").unwrap();
+        let sysctl_text = path_string(&sysctl);
+        let udev_text = path_string(&udev);
+        let reloads = AtomicU64::new(0);
+
+        let result = apply_managed_files_with_reloader(
+            &sysctl_text,
+            &udev_text,
+            "new sysctl\n",
+            "ACTION==\"add\", TEST==\"device\"\n",
+            || Ok(()),
+            || {
+                if reloads.fetch_add(1, Ordering::Relaxed) == 0 {
+                    bail!("simulated udev reload failure");
+                }
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&sysctl).unwrap(), "previous sysctl\n");
+        assert_eq!(fs::read_to_string(&udev).unwrap(), "previous udev\n");
+        assert_eq!(reloads.load(Ordering::Relaxed), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_removes_managed_files_that_did_not_exist_before_apply() {
+        let root = temp_root("rollback-new-files");
+        let sysctl = root.join("sysctl.conf");
+        let udev = root.join("udev.rules");
+        let sysctl_text = path_string(&sysctl);
+        let udev_text = path_string(&udev);
+
+        let result = apply_managed_files_with_reloader(
+            &sysctl_text,
+            &udev_text,
+            "new sysctl\n",
+            "new udev\n",
+            || bail!("simulated sysctl reload failure"),
+            || Ok(()),
+        );
+
+        assert!(result.is_err());
+        assert!(!sysctl.exists());
+        assert!(!udev.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

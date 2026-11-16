@@ -115,9 +115,9 @@ fn read_manifest(stage_dir: &Path, release: &str) -> Result<(Manifest, PathBuf, 
     let manifest: Manifest = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing build provenance {}", manifest_path.display()))?;
 
-    if manifest.schema_version != 2 {
+    if !matches!(manifest.schema_version, 2 | 3) {
         bail!(
-            "unsupported provenance schema {}; expected schema 2",
+            "unsupported provenance schema {}; expected schema 2 or 3",
             manifest.schema_version
         );
     }
@@ -301,6 +301,20 @@ fn write_package_sources(input: PackageSourceInput<'_>) -> Result<()> {
     } else {
         String::new()
     };
+    let payload_archive = workspace.join("payload.tar");
+    let tar_status = Command::new("tar")
+        .args(["--create", "--file"])
+        .arg(&payload_archive)
+        .arg("--directory")
+        .arg(workspace)
+        .arg("payload")
+        .status()
+        .context("creating a source archive for the staged kernel payload")?;
+    if !tar_status.success() {
+        bail!("tar failed while archiving the staged kernel payload ({tar_status})");
+    }
+    let payload_sha256 = crate::provenance::sha256_file(&payload_archive)?;
+    let payload_source = format!("file://{}", payload_archive.display());
     let kernel_image_path = format!("vmlinuz-{package_name}");
     let pkgbuild = format!(
         r#"pkgname={package_name}
@@ -311,6 +325,8 @@ arch=('x86_64')
 url='https://github.com/sxiii/kernel-optimizer'
 license=('GPL-2.0-only')
 depends=('kmod' '{initramfs_backend}')
+source=('{payload_source}')
+sha256sums=('{payload_sha256}')
 options=('!strip')
 KERNEL_RELEASE='{release}'
 
@@ -362,9 +378,13 @@ fn ensure_tool(program: &str) -> Result<()> {
     Ok(())
 }
 
-fn active_pacman_hook(name: &str) -> Option<PathBuf> {
-    let system = PathBuf::from("/usr/share/libalpm/hooks").join(name);
-    let local = PathBuf::from("/etc/pacman.d/hooks").join(name);
+fn active_pacman_hook_in(
+    system_dir: &Path,
+    local_dir: &Path,
+    name: &str,
+) -> Option<PathBuf> {
+    let system = system_dir.join(name);
+    let local = local_dir.join(name);
 
     // A local hook with the same name takes precedence. Respect /dev/null masks.
     match fs::symlink_metadata(&local) {
@@ -382,6 +402,14 @@ fn active_pacman_hook(name: &str) -> Option<PathBuf> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => system.is_file().then_some(system),
         Err(_) => None,
     }
+}
+
+fn active_pacman_hook(name: &str) -> Option<PathBuf> {
+    active_pacman_hook_in(
+        Path::new("/usr/share/libalpm/hooks"),
+        Path::new("/etc/pacman.d/hooks"),
+        name,
+    )
 }
 
 fn hook_exec(hook: &Path) -> Option<PathBuf> {
@@ -456,6 +484,22 @@ pub fn build(
     version: &str,
     output_dir: &Path,
 ) -> Result<PathBuf> {
+    let initramfs_backend = detect_initramfs_backend()?;
+    build_with_backend(stage_dir, release, version, output_dir, initramfs_backend)
+}
+
+fn build_with_backend(
+    stage_dir: &Path,
+    release: &str,
+    version: &str,
+    output_dir: &Path,
+    initramfs_backend: &str,
+) -> Result<PathBuf> {
+    if !matches!(initramfs_backend, "mkinitcpio" | "dracut") {
+        bail!("unsupported initramfs backend for package build: {initramfs_backend}");
+    }
+    ensure_tool(initramfs_backend)?;
+
     if !valid_version(version) {
         bail!("invalid package version '{version}'");
     }
@@ -468,8 +512,6 @@ pub fn build(
     let architecture = arch_name()?;
     ensure_tool("makepkg")?;
     ensure_tool("pacman")?;
-    let initramfs_backend = detect_initramfs_backend()?;
-
     let stage_dir = fs::canonicalize(stage_dir)
         .with_context(|| format!("resolving staging directory {}", stage_dir.display()))?;
     let (manifest, image, modules, config, system_map) =
@@ -785,6 +827,39 @@ mod tests {
     }
 
     #[test]
+    fn active_hook_prefers_local_override_and_honors_dev_null_masks() {
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-hook-precedence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let system = root.join("usr/share/libalpm/hooks");
+        let local = root.join("etc/pacman.d/hooks");
+        fs::create_dir_all(&system).unwrap();
+        fs::create_dir_all(&local).unwrap();
+        let name = "90-mkinitcpio-install.hook";
+        let system_hook = system.join(name);
+        let local_hook = local.join(name);
+        fs::write(&system_hook, "[Action]\\nExec = /usr/bin/system-hook\\n").unwrap();
+        fs::write(&local_hook, "[Action]\\nExec = /usr/bin/local-hook\\n").unwrap();
+
+        assert_eq!(
+            active_pacman_hook_in(&system, &local, name).as_deref(),
+            Some(local_hook.as_path())
+        );
+
+        fs::remove_file(&local_hook).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/dev/null", &local_hook).unwrap();
+        assert!(active_pacman_hook_in(&system, &local, name).is_none());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn hook_target_match_requires_kernel_vmlinuz_or_pkgbase() {
         let root = std::env::temp_dir().join(format!(
             "kernel-optimizer-hook-target-{}-{}",
@@ -832,5 +907,88 @@ mod tests {
         assert!(preset.contains("ALL_kver='/boot/vmlinuz-linux-optimizer-7.3.4-ko'"));
         assert!(preset.contains("default_image='/boot/initramfs-linux-optimizer-7.3.4-ko.img'"));
         assert!(preset.contains("fallback_image='/boot/initramfs-linux-optimizer-7.3.4-ko-fallback.img'"));
+    }
+
+    #[test]
+    fn arch_package_build_smoke_in_clean_environment() {
+        if std::env::var_os("KERNEL_OPTIMIZER_RUN_ARCH_PACKAGE_INTEGRATION").is_none() {
+            return;
+        }
+        if unsafe { libc::geteuid() } == 0 {
+            panic!("Arch package integration test must run as an unprivileged build user");
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "kernel-optimizer-arch-package-integration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let stage = root.join("stage");
+        let release = "7.3.4-ko";
+        let boot = stage.join("boot");
+        let modules = stage.join("root/lib/modules").join(release);
+        fs::create_dir_all(&boot).unwrap();
+        fs::create_dir_all(&modules).unwrap();
+
+        let image = boot.join(format!("vmlinuz-{release}"));
+        let config = boot.join(format!("config-{release}"));
+        let system_map = boot.join(format!("System.map-{release}"));
+        fs::write(&image, b"synthetic kernel image for package integration test").unwrap();
+        fs::write(&config, "CONFIG_MODULE_SIG_FORCE=n\nCONFIG_TEST=y\n").unwrap();
+        fs::write(&system_map, "00000000 T _text\n").unwrap();
+        fs::write(modules.join("modules.dep"), "kernel/test.ko:\n").unwrap();
+        fs::write(modules.join("modules.alias"), "alias test:* test\n").unwrap();
+
+        let image_hash = crate::provenance::sha256_file(&image).unwrap();
+        let config_hash = crate::provenance::sha256_file(&config).unwrap();
+        let system_map_hash = crate::provenance::sha256_file(&system_map).unwrap();
+        let (modules_hash, _, _) = crate::provenance::sha256_tree(&modules).unwrap();
+        let manifest = serde_json::json!({
+            "schema_version": 3,
+            "source": { "signature_verified": true },
+            "build": { "effective_config_sha256": config_hash },
+            "artifacts": {
+                "kernel_release": release,
+                "kernel_image": format!("boot/vmlinuz-{release}"),
+                "kernel_image_sha256": image_hash,
+                "system_map": format!("boot/System.map-{release}"),
+                "system_map_sha256": system_map_hash,
+                "modules_directory": format!("root/lib/modules/{release}"),
+                "modules_staged": true,
+                "modules_tree_sha256": modules_hash
+            }
+        });
+        fs::write(
+            stage.join("provenance.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        ).unwrap();
+
+        let output = root.join("packages");
+        // Backend selection is tested independently of host hook discovery below.
+        // The public build() entry point still requires a real active pacman hook.
+        let package = build_with_backend(&stage, release, "1.0", &output, "mkinitcpio").unwrap();
+        assert!(package.is_file());
+        assert!(fs::metadata(&package).unwrap().len() > 0);
+
+        let package_info = Command::new("pacman")
+            .args(["-Qip"])
+            .arg(&package)
+            .output()
+            .unwrap();
+        assert!(
+            package_info.status.success(),
+            "pacman could not inspect the built package: {}",
+            String::from_utf8_lossy(&package_info.stderr)
+        );
+        let info = String::from_utf8_lossy(&package_info.stdout);
+        let package_name = info.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == "Name").then(|| value.trim().to_owned())
+        }).unwrap_or_default();
+        assert_eq!(package_name, format!("linux-optimizer-{release}"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

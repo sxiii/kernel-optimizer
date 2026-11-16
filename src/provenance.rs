@@ -6,6 +6,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +218,223 @@ pub fn verify_kernel_archive(
     gpg_home: Option<&Path>,
 ) -> Result<SignatureVerification> {
     verify_kernel_archive_with_signers(archive, signature, gpg_home, TRUSTED_SIGNERS)
+}
+
+fn key_file_has_primary_fingerprint(path: &Path, expected: &str) -> Result<bool> {
+    let output = Command::new("gpg")
+        .args(["--no-options", "--batch", "--with-colons", "--show-keys", "--fingerprint"])
+        .arg(path)
+        .output()
+        .context("checking downloaded OpenPGP key fingerprint before import")?;
+    if !output.status.success() {
+        bail!(
+            "GnuPG could not inspect downloaded key: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let expected = normalized_fingerprint(expected);
+    let mut next_fingerprint_is_primary = false;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let fields = line.split(':').collect::<Vec<_>>();
+        match fields.first().copied() {
+            Some("pub") | Some("sec") => next_fingerprint_is_primary = true,
+            Some("fpr") if next_fingerprint_is_primary => {
+                next_fingerprint_is_primary = false;
+                if fields.get(9).is_some_and(|value| normalized_fingerprint(value) == expected) {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
+/// Fetches a public key only by its compiled-in full fingerprint. The keyserver is
+/// an untrusted transport: its response is inspected locally and imported only
+/// after GnuPG reports the exact expected primary fingerprint.
+fn ensure_pinned_public_key(
+    gpg_home: Option<&Path>,
+    signer_name: &str,
+    fingerprint: &str,
+) -> Result<()> {
+    if fingerprint_available(gpg_home, fingerprint)? {
+        return Ok(());
+    }
+
+    let fingerprint = normalized_fingerprint(fingerprint);
+    let urls = [
+        format!("https://keys.openpgp.org/vks/v1/by-fingerprint/{fingerprint}"),
+        format!("https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x{fingerprint}"),
+    ];
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(25))
+        .user_agent("kernel-optimizer/0.3")
+        .build()
+        .context("creating HTTP client for pinned OpenPGP key retrieval")?;
+    let mut failures = Vec::new();
+
+    for url in urls {
+        let response = match client.get(&url).send() {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                failures.push(format!("{url}: HTTP {}", response.status()));
+                continue;
+            }
+            Err(error) => {
+                failures.push(format!("{url}: {error}"));
+                continue;
+            }
+        };
+        let bytes = match response.bytes() {
+            Ok(bytes) if !bytes.is_empty() && bytes.len() <= 2_000_000 => bytes,
+            Ok(bytes) => {
+                failures.push(format!("{url}: unexpected key response size ({} bytes)", bytes.len()));
+                continue;
+            }
+            Err(error) => {
+                failures.push(format!("{url}: {error}"));
+                continue;
+            }
+        };
+        if !bytes.starts_with(b"-----BEGIN PGP PUBLIC KEY BLOCK-----") {
+            failures.push(format!("{url}: response was not an ASCII-armored public key"));
+            continue;
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let key_path = std::env::temp_dir().join(format!(
+            "kernel-optimizer-pinned-key-{}-{stamp}.asc",
+            std::process::id()
+        ));
+        let write_result = fs::write(&key_path, &bytes)
+            .with_context(|| format!("writing temporary public key {}", key_path.display()));
+        if let Err(error) = write_result {
+            failures.push(format!("{url}: {error:#}"));
+            continue;
+        }
+
+        let result = (|| -> Result<()> {
+            if !key_file_has_primary_fingerprint(&key_path, &fingerprint)? {
+                bail!("downloaded key does not have the pinned primary fingerprint {fingerprint}");
+            }
+
+            let mut command = Command::new("gpg");
+            command.args([
+                "--no-options",
+                "--batch",
+                "--no-auto-key-retrieve",
+                "--no-auto-key-locate",
+            ]);
+            if let Some(home) = gpg_home {
+                if !home.is_dir() {
+                    bail!("configured GPG home is not a directory: {}", home.display());
+                }
+                command.arg("--homedir").arg(home);
+            }
+            let output = command.arg("--import").arg(&key_path).output()
+                .context("importing fingerprint-verified public key into the configured GPG keyring")?;
+            if !output.status.success() {
+                bail!("GnuPG key import failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+            }
+            if !fingerprint_available(gpg_home, &fingerprint)? {
+                bail!("GnuPG import completed but the pinned primary fingerprint is still unavailable");
+            }
+            Ok(())
+        })();
+        let _ = fs::remove_file(&key_path);
+        match result {
+            Ok(()) => {
+                eprintln!(
+                    "Imported pinned public key for {signer_name} after verifying primary fingerprint {fingerprint}"
+                );
+                return Ok(());
+            }
+            Err(error) => failures.push(format!("{url}: {error:#}")),
+        }
+    }
+
+    bail!(
+        "the pinned public key for {signer_name} ({fingerprint}) is missing and could not be safely retrieved. Tried keys.openpgp.org and keyserver.ubuntu.com. Details: {}",
+        failures.join("; ")
+    )
+}
+
+pub fn verify_detached_file(
+    file: &Path,
+    signature: &Path,
+    gpg_home: Option<&Path>,
+    signer_name: &str,
+    signer_fingerprint: &str,
+) -> Result<SignatureVerification> {
+    if !file.is_file() {
+        bail!("signed source file does not exist: {}", file.display());
+    }
+    if !signature.is_file() {
+        bail!("detached signature does not exist: {}", signature.display());
+    }
+    ensure_pinned_public_key(gpg_home, signer_name, signer_fingerprint)?;
+    let trusted = [TrustedSigner {
+        name: signer_name,
+        fingerprint: signer_fingerprint,
+    }];
+    let mut command = Command::new("gpg");
+    command.args([
+        "--no-options",
+        "--batch",
+        "--no-auto-key-import",
+        "--no-auto-key-retrieve",
+        "--no-auto-key-locate",
+        "--status-fd=1",
+    ]);
+    if let Some(home) = gpg_home {
+        if !home.is_dir() {
+            bail!("configured GPG home is not a directory: {}", home.display());
+        }
+        command.arg("--homedir").arg(home);
+    }
+    let output = command
+        .arg("--verify")
+        .arg(signature)
+        .arg(file)
+        .output()
+        .context("starting GnuPG to verify the upstream patch signature")?;
+    if !output.status.success() {
+        bail!(
+            "detached patch signature verification failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    signer_from_status_with_signers(
+        &String::from_utf8_lossy(&output.stdout),
+        &trusted,
+    ).context("patch signature did not match its pinned signer fingerprint")
+}
+
+pub fn fingerprint_available(gpg_home: Option<&Path>, expected: &str) -> Result<bool> {
+    let mut command = Command::new("gpg");
+    command.args(["--no-options", "--batch"]);
+    if let Some(home) = gpg_home {
+        if !home.is_dir() {
+            bail!("configured GPG home is not a directory: {}", home.display());
+        }
+        command.arg("--homedir").arg(home);
+    }
+    command.args(["--with-colons", "--fingerprint", "--list-keys"]);
+    let output = command.output().context("listing keys in the configured GnuPG keyring")?;
+    if !output.status.success() {
+        bail!("GnuPG could not list the configured keyring: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    let expected = normalized_fingerprint(expected);
+    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        let fields = line.split(':').collect::<Vec<_>>();
+        fields.first() == Some(&"fpr")
+            && fields.get(9).is_some_and(|fingerprint| normalized_fingerprint(fingerprint) == expected)
+    }))
 }
 
 pub fn trusted_key_available(gpg_home: Option<&Path>) -> Result<Option<String>> {

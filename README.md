@@ -1,45 +1,49 @@
 # Kernel Optimizer
 
-A Rust CLI prototype for inspecting Linux hardware, discovering the current upstream stable kernel, creating an explicit build profile, compiling a kernel and staging artifacts for review.
+A Rust application for inspecting Linux hardware, comparing kernel performance, tuning selected system settings, building and staging upstream/optimized kernels, and packaging reviewed builds for supported systems.
 
-> **Safety:** this project does not replace your running kernel, install modules into the host, or modify GRUB/systemd-boot. Build output is staged separately. Bootloader integration is intentionally disabled until distribution-specific package and rollback adapters exist.
+> **Safety:** this project does not replace your running kernel or modify GRUB/systemd-boot. Build output is staged separately; Arch/Garuda package installation is a separate, explicitly authorized step. Bootloader entry creation and rollback automation remain disabled.
 
 ## Status
 
-The current milestone is a read-only hardware advisor, a conservative system-tuning tool,
-a repeatable benchmark/report workflow, and an upstream kernel build-and-stage prototype.
-The running kernel and bootloader are not modified by the build command.
+Kernel Optimizer currently provides a hardware advisor, conservative system tuning,
+repeatable benchmark/report workflows, six selectable kernel source tracks, staged
+kernel builds, and an Arch/Garuda package-and-install workflow. Kernel builds remain
+separate from package installation; bootloader entries and Secure Boot signing are
+not automated.
 
 **Implemented**
 
-- [x] Hardware inventory and workload-aware, read-only recommendations.
-- [x] Interactive read-only terminal dashboard.
-- [x] Upstream stable and long-term-support kernel discovery, configurable build profiles, and staged builds.
-- [x] Staged kernel image verification, pinned OpenPGP source-signature verification, and SHA-256 build provenance.
-- [x] Read-only build preflight (doctor) for dependencies, config source and disk space.
-- [x] Workload-aware sysctl/I/O-scheduler preview, apply and revert.
-- [x] CPU, memory, optional fio/iperf3 benchmarks and report comparison.
-- [x] Automated unit tests and CI lint/test checks.
+- [x] Hardware inventory, workload-aware read-only recommendations, read-only firmware/bootloader/ESP/boot-entry inventory, and an interactive terminal dashboard.
+- [x] Six kernel sources: upstream stable, upstream LTS, Zen, CachyOS, TKG and PREEMPT_RT, with each source's trust limitations recorded.
+- [x] Configurable kernel builds, source/patch verification, staged image validation, and machine-readable provenance.
+- [x] Read-only build preflight for profile settings, dependencies, config source, signer keys and disk space.
+- [x] Workload-aware sysctl/I/O-scheduler preview, transactional apply, rollback and revert.
+- [x] CPU, memory, optional fio/iperf3 benchmarks and validated JSON report comparison.
+- [x] Arch/Garuda pacman package creation and separately authorized installation; initramfs generation is delegated to the detected active pacman hook.
+- [x] Native desktop GUI, CLI/TUI workflows, selectable activity logs, copy/save controls, and PolicyKit-gated privileged actions.
+- [x] Hardware-independent regression tests and GitHub Actions lint/test checks, including isolated-keyring GPG signature verification and rollback/cache/staging/benchmark edge cases.
 
 **Next**
 
-- [ ] Add broader hardware-independent tests for build staging, tuning rollback and benchmark edge cases.
-- [ ] Add distro packaging adapters (Arch/Garuda first) that produce installable packages without changing the boot path.
-- [ ] Add initramfs, module-signing and Secure Boot preflight/integration.
-- [ ] Add boot-entry creation only with a known-good fallback and tested rollback.
-- [ ] Test builds and tuning behavior across multiple distributions and kernel configurations.
-- [ ] Add additional kernel source adapters (linux-zen, CachyOS, TKG and PREEMPT_RT) after their patch/config provenance is defined.
+- [x] End-to-end kernel archive signature verification test using an isolated temporary GPG keyring, a generated test signer and a tampered-archive rejection case.
+- [x] Build and inspect a real pacman package in a clean Arch container as an unprivileged user (GitHub Actions).
+- [ ] Validate full kernel builds and tuning on Debian/Ubuntu and Fedora, plus additional supported kernel configurations. Application compile/lint/test smoke jobs have passed on Debian and Fedora; full kernel builds and tuning on those distributions are not yet validated.
+- [ ] Add module-signing support and a complete Secure Boot signing/enrollment workflow; current install checks fail closed when Secure Boot is enabled or uncertain.
+- [x] Detect firmware mode, standard bootloader installations, boot menu entries, EFI boot variables and mounted ESP/boot filesystems without changing them.
+- [ ] Design safe boot-entry creation with a preserved known-good fallback and tested rollback.
+- [ ] Add reproducible hardware-specific benchmark suites only where the workload and limitations can be documented.
 
-The install subcommand is intentionally disabled. Package installation and bootloader
-mutation remain separate future milestones; a staged image is not an installable or
-bootable system by itself.
+The application can create and install a kernel package as a separate, explicit action.
+It does not create or modify GRUB/systemd-boot entries, enroll Secure Boot keys, or
+replace the currently bootable kernel. The boot inventory is heuristic and may be incomplete in containers or custom layouts. A staged or installed kernel is not proof that a machine can boot it; retain a known-good boot entry until the new one has been tested.
 
 ## Requirements
 
-Rust stable, a C toolchain, make, curl, xz, tar, GnuPG 2.4 or later, bc, bison, flex, OpenSSL development headers, elfutils, pahole, perl, python and the usual kernel build dependencies. On Arch/Garuda, start with:
+Rust stable, a C toolchain, make, curl, xz, tar, GnuPG 2.4 or later, bc, bison, flex, OpenSSL development headers, elfutils, pahole, perl, python and the usual kernel build dependencies. Zen additionally needs zstd and patch; PREEMPT_RT needs patch; CachyOS needs gzip; TKG needs git and patch. On Arch/Garuda, start with:
 
 ```sh
-sudo pacman -S --needed base-devel rust curl xz gnupg bc bison flex openssl elfutils pahole perl python ccache
+sudo pacman -S --needed base-devel rust git curl xz zstd gzip patch tar gnupg bc bison flex openssl elfutils pahole perl python ccache
 ```
 
 Optional tools such as `lspci`, `lsblk`, `zcat` and `menuconfig` enhance inspection/configuration.
@@ -69,6 +73,57 @@ because it was imported. The application compares the full primary fingerprint
 against the allowlist. Verification disables GnuPG option files, embedded-key import,
 automatic key retrieval and automatic key location; it fails on bad, expired or
 revoked signature status.
+
+### Additional kernel source adapters
+
+The build profile accepts these additional source values:
+
+| Profile value | Source behavior | Trust / packaging |
+|---|---|---|
+| \`linux-zen\` | Downloads the kernel.org stable archive, then applies the current Zen release patch matching that exact base version. | Verifies the kernel.org tarball and the detached signature on the Zen patch. Eligible for verified packaging when the build artifacts pass the normal checks. |
+| \`linux-rt\` | Downloads the exact upstream X.Y base release and applies the latest PREEMPT_RT patch advertised for that kernel.org series. | Verifies the kernel.org tarball and the RT patch signature. RT builds are pinned to X.Y, not a later X.Y.Z stable point release. |
+| \`linux-cachyos\` | Downloads the full source archive from the latest CachyOS Linux GitHub release. | Requires \`allow_unverified_sources = true\`; checks the SHA-256 digest published in GitHub release metadata, but does not claim a trusted detached signature. Not eligible for verified Arch packaging. |
+| \`linux-tkg\` | Starts with a signed kernel.org stable archive and applies the pinned TKG Glitched Base, EEVDF additions and Glitched CFS patches in upstream order for the matching release. No TKG shell installer or PKGBUILD is executed. | Requires \`allow_unverified_sources = true\`; patches are pinned to a Git commit and checked against Git blob IDs, but are not independently signed. Not eligible for verified Arch packaging. |
+
+CachyOS and TKG are deliberately opt-in because their current source artifacts do
+not meet the project's detached-signature trust policy. Add this to a profile only
+after reviewing and accepting that limitation:
+
+\`\`\`toml
+source = "linux-cachyos" # or "linux-tkg"
+version = "stable"
+allow_unverified_sources = true
+\`\`\`
+
+The GUI exposes the same checkbox when either opt-in source is selected. The
+provenance manifest records each patch URL, hash, signature status, signer and
+pinned TKG source revision. An unverified source remains non-packageable: the
+Arch package adapter continues to reject it rather than silently converting a
+GitHub digest or an unsigned patch into a trusted signature.
+
+For Zen and PREEMPT_RT, the builder can bootstrap a missing patch-signing public key
+on first use. It queries keys.openpgp.org by the full pinned fingerprint, then
+keyserver.ubuntu.com as a fallback. GnuPG inspects the downloaded key and the
+builder imports it only when its **primary fingerprint exactly matches** the
+compiled-in value below. The detached signature is still verified locally
+after import; a keyserver response is never trusted merely because it was downloaded.
+
+The Activity page now offers **Copy all** and **Save log...**, and individual log
+lines can be selected. Curl progress meters are suppressed so the activity log
+contains actual diagnostics rather than repeated transfer-meter rows.
+
+The Zen and PREEMPT_RT patch signers have separate pinned primary fingerprints:
+
+| Patch source | Signer | Pinned primary fingerprint |
+|---|---|---|
+| Linux Zen | Jan Alexander Steffens (heftig) | \`83BC8889351B5DEBBB68416EB8AC08600F108CDF\` |
+| PREEMPT_RT | Sebastian Andrzej Siewior | \`64254695FFF0AA4466CC19E67B96E8162A8CF5D1\` |
+
+The Zen and PREEMPT_RT patch keys are fetched on first use when missing. The
+application checks the complete primary fingerprint before importing either key,
+then verifies the detached patch signature against that exact pinned identity.
+Kernel.org base-release keys remain a separate trust set and should be prepared
+in the build user's GnuPG home as described below.
 
 ### Prepare the GnuPG keyring once
 
@@ -446,32 +501,32 @@ The command requires the existing source/build tree, staged artifacts and cached
 missing or empty, it downloads that small file from the matching kernel.org release
 directory, then verifies it against the pinned signer allowlist. If only one matching
 module release exists under the staging root, `--version` may be omitted.
-Recovered manifests use schema version 2 and explicitly mark original build timing,
+Recovered manifests use schema version 3 and explicitly mark original build timing,
 host inventory, compiler versions and command history as unavailable rather than
 inventing them. Source signature verification and staged artifact hashes are
 recomputed during recovery. The recovered manifest cannot independently prove
 that the source tree was not edited after the original extraction.
 
-The build remains staged outside the live boot path. Initramfs generation,
-distribution package creation, module signing, Secure Boot enrollment, bootloader
-entry creation and rollback integration are not yet automated. Keep a known-good
-boot entry and review the staged image before installing it.
+The build remains staged outside the live boot path. Arch/Garuda package creation and
+installation are implemented separately, and the package's pacman hook generates the
+initramfs. Module signing, Secure Boot key enrollment, bootloader entry creation and
+automated boot-entry rollback are not implemented. Keep a known-good boot entry and
+review the staged image before installing it.
 
 
 ## Kernel source tracks
 
-The source selector currently enables two verified kernel.org tracks:
+The GUI and CLI expose six kernel sources:
 
-- `linux`: resolves the latest `stable` release from `releases.json`.
-- `linux-lts`: resolves the latest `longterm` release from `releases.json`.
+- \`linux\`: latest kernel.org stable release.
+- \`linux-lts\`: latest kernel.org longterm release.
+- \`linux-zen\`: signed Zen patch on its exact signed kernel.org stable base.
+- \`linux-rt\`: signed PREEMPT_RT patch on the matching kernel.org X.Y base.
+- \`linux-cachyos\`: CachyOS source release archive, verified against its GitHub-published SHA-256 digest; explicit opt-in is required because this is not a trusted detached signature.
+- \`linux-tkg\`: signed kernel.org base plus the pinned TKG Glitched Base, EEVDF additions and Glitched CFS patch sequence; explicit opt-in is required because the TKG patches are unsigned.
 
-Both use the official detached release signature and the pinned kernel.org signer
-allowlist before extraction or compilation. A numeric `version` can be used to pin
-a particular release.
-
-The GUI also lists Linux Zen, CachyOS, Linux TKG and PREEMPT_RT, but keeps them
-disabled until each has an independently reviewed source adapter. Zen requires
-verification of its signed release tags; CachyOS needs signed source plus a pinned
-patch manifest; TKG's upstream build scripts must not be executed implicitly; and
-PREEMPT_RT requires validation of its separate patch signer and exact kernel/RT
-version pairing. These are deliberately not treated as ordinary kernel.org tarballs.
+CachyOS and TKG builds are explicitly marked unverified and are rejected by the
+verified Arch package workflow. TKG's interactive upstream scripts are not run.
+All patch downloads are hashed and recorded; TKG patch files are also checked
+against their Git blob IDs. The Zen and PREEMPT_RT patch signers use separately
+pinned primary fingerprints.

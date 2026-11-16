@@ -27,6 +27,7 @@ stage_dir = "/var/tmp/kernel-optimizer/stage"
 enable_lto = false
 enable_bpf = true
 menuconfig = false
+allow_unverified_sources = false
 "#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -391,6 +392,21 @@ impl KernelOptimizerApp {
         Ok(())
     }
 
+    fn set_profile_allow_unverified(&mut self, allowed: bool) -> Result<()> {
+        let mut value: toml::Value = toml::from_str(&self.profile_text)
+            .context("profile text is not valid TOML")?;
+        let table = value.as_table_mut().context("profile root must be a TOML table")?;
+        table.insert("allow_unverified_sources".into(), toml::Value::Boolean(allowed));
+        self.profile_text = toml::to_string_pretty(&value)?;
+        self.profile_dirty = true;
+        self.log(if allowed {
+            "Explicit unverified-source opt-in enabled"
+        } else {
+            "Unverified-source opt-in disabled"
+        });
+        Ok(())
+    }
+
     fn save_profile(&mut self) -> Result<()> {
         let _: toml::Value = toml::from_str(&self.profile_text)
             .context("profile text is not valid TOML")?;
@@ -694,6 +710,79 @@ impl KernelOptimizerApp {
             Self::stat_card(&mut columns[2], "Storage devices", &devices.to_string(), "Block devices and volumes", Color32::from_rgb(125, 208, 161));
         });
 
+        let boot = self.hardware.as_ref().and_then(|value| value.get("boot"));
+        let firmware = boot.and_then(|value| value.get("firmware_mode"))
+            .and_then(serde_json::Value::as_str).unwrap_or("Refresh hardware to inspect firmware");
+        let bootloaders = boot.and_then(|value| value.get("detected_bootloaders"))
+            .and_then(serde_json::Value::as_array)
+            .map(|items| items.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join(", "))
+            .filter(|items| !items.is_empty()).unwrap_or_else(|| "None detected in standard paths".into());
+        let current_entry = boot.and_then(|value| value.get("current_boot_entry"))
+            .and_then(serde_json::Value::as_str).unwrap_or("Not identified");
+        let current_image = boot.and_then(|value| value.get("current_kernel_image"))
+            .and_then(serde_json::Value::as_str).unwrap_or("Not exposed in /proc/cmdline");
+        let esp = boot.and_then(|value| value.get("efi_system_partition"))
+            .filter(|value| !value.is_null())
+            .map(|value| format!(
+                "{} — {} ({})",
+                value["target"].as_str().unwrap_or("?"),
+                value["source"].as_str().unwrap_or("?"),
+                value["filesystem"].as_str().unwrap_or("?")
+            ))
+            .unwrap_or_else(|| "No mounted FAT ESP detected at standard mountpoints".into());
+        let boot_entries = boot.and_then(|value| value.get("boot_entries"))
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().take(8).map(|entry| {
+                let title = entry["title"].as_str().unwrap_or("Unnamed entry");
+                let marker = if entry["is_selected"].as_bool().unwrap_or(false) {
+                    " [selected]"
+                } else if entry["is_default"].as_bool().unwrap_or(false) {
+                    " [default]"
+                } else {
+                    ""
+                };
+                format!("{title}{marker}")
+            }).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let boot_notes = boot.and_then(|value| value.get("notes"))
+            .and_then(serde_json::Value::as_array)
+            .map(|notes| notes.iter().filter_map(serde_json::Value::as_str).map(str::to_owned).collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        ui.add_space(12.0);
+        Self::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Boot environment");
+                ui.label(RichText::new("Read-only").color(Color32::from_rgb(125, 208, 161)));
+            });
+            ui.columns(2, |columns| {
+                columns[0].label(RichText::new("Firmware").small().color(Color32::GRAY));
+                columns[0].label(RichText::new(firmware).strong());
+                columns[0].add_space(6.0);
+                columns[0].label(RichText::new("Detected bootloaders").small().color(Color32::GRAY));
+                columns[0].label(&bootloaders);
+                columns[1].label(RichText::new("Current boot entry").small().color(Color32::GRAY));
+                columns[1].label(current_entry);
+                columns[1].add_space(6.0);
+                columns[1].label(RichText::new("Running kernel image").small().color(Color32::GRAY));
+                columns[1].label(current_image);
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new("EFI System Partition").small().color(Color32::GRAY));
+            ui.label(&esp);
+            if !boot_entries.is_empty() {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Detected menu entries").small().color(Color32::GRAY));
+                for entry in &boot_entries {
+                    ui.label(entry);
+                }
+            }
+            for note in boot_notes.iter().take(2) {
+                ui.label(RichText::new(note).small().color(Color32::from_rgb(235, 191, 104)));
+            }
+            ui.label(RichText::new("This inventory does not modify boot entries, EFI variables or Secure Boot settings.").small().color(Color32::GRAY));
+        });
+
         ui.add_space(12.0);
         ui.columns(2, |columns| {
             Self::card(&mut columns[0], |ui| {
@@ -918,14 +1007,14 @@ impl KernelOptimizerApp {
         ui.add_space(8.0);
         if self.sources_text.trim().is_empty() {
             self.sources_text = String::from(
-                "SOURCE            STATUS       TRACK / PURPOSE\nlinux             SUPPORTED    Latest stable kernel.org release\nlinux-lts          SUPPORTED    Latest longterm kernel.org release\nlinux-zen          PLANNED      Signed Zen source adapter pending\nlinux-cachyos      PLANNED      Signed CachyOS source and patch manifest pending\nlinux-tkg          PLANNED      Audited patch adapter pending (no scripts executed)\nlinux-rt           PLANNED      PREEMPT_RT patch signer/version adapter pending\n\nOnly supported tracks can be built. Planned tracks remain visible but fail closed until source provenance is verified.",
+                "SOURCE            STATUS       TRACK / PURPOSE\nlinux             SUPPORTED    Latest signed kernel.org stable\nlinux-lts          SUPPORTED    Latest signed kernel.org longterm\nlinux-zen          SUPPORTED    Signed Zen patch on signed kernel.org base\nlinux-rt           SUPPORTED    Signed PREEMPT_RT patch on signed kernel.org base\nlinux-cachyos      OPT-IN       GitHub SHA-256 checked source archive; signature not verified\nlinux-tkg          OPT-IN       Pinned EEVDF patch subset; patches are unsigned\n\nCachyOS and TKG require explicit allow_unverified_sources opt-in and cannot be packaged.",
             );
         }
         Self::card(ui, |ui| {
             ui.label(RichText::new(&self.sources_text).monospace());
         });
         ui.add_space(8.0);
-        ui.label(RichText::new("Linux stable and Linux LTS are buildable now. Zen, CachyOS, TKG and PREEMPT_RT remain visible but disabled until their independent source signatures, patch manifests and version mappings are implemented.").color(Color32::from_rgb(235, 191, 104)));
+        ui.label(RichText::new("Zen and PREEMPT_RT use pinned detached-signature verification. CachyOS and TKG are opt-in because their current source material is not covered by a trusted detached signature; they remain ineligible for verified Arch packaging.").color(Color32::from_rgb(235, 191, 104)));
     }
 
     fn profile_page(&mut self, ui: &mut egui::Ui) {
@@ -984,7 +1073,7 @@ impl KernelOptimizerApp {
     }
 
     fn build_page(&mut self, ui: &mut egui::Ui) {
-        Self::page_header(ui, "Build kernel", "Select a verified kernel source, then download, configure, compile and stage it.");
+        Self::page_header(ui, "Build kernel", "Select a kernel source, then download, verify its source policy, configure, compile and stage it.");
         ui.horizontal(|ui| {
             ui.label("Profile");
             ui.add(egui::TextEdit::singleline(&mut self.profile_path).desired_width(340.0));
@@ -1006,19 +1095,19 @@ impl KernelOptimizerApp {
             egui::ComboBox::from_label("Kernel source")
                 .selected_text(match configured_source.as_str() {
                     "linux-lts" => "Linux LTS (kernel.org longterm)",
-                    "linux-zen" => "Linux Zen (not yet supported)",
-                    "linux-cachyos" => "CachyOS (not yet supported)",
-                    "linux-tkg" => "Linux TKG (not yet supported)",
-                    "linux-rt" => "PREEMPT_RT (not yet supported)",
+                    "linux-zen" => "Linux Zen (signed patch)",
+                    "linux-cachyos" => "CachyOS (opt-in source archive)",
+                    "linux-tkg" => "Linux TKG (opt-in EEVDF patch profile)",
+                    "linux-rt" => "PREEMPT_RT (signed RT patch)",
                     _ => "Linux stable (kernel.org)",
                 })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut selected_source, "linux".into(), "Linux stable - signed kernel.org release");
                     ui.selectable_value(&mut selected_source, "linux-lts".into(), "Linux LTS - signed kernel.org longterm release");
-                    ui.add_enabled_ui(false, |ui| { ui.label("Linux Zen - source adapter pending"); });
-                    ui.add_enabled_ui(false, |ui| { ui.label("CachyOS - source adapter pending"); });
-                    ui.add_enabled_ui(false, |ui| { ui.label("Linux TKG - source adapter pending"); });
-                    ui.add_enabled_ui(false, |ui| { ui.label("PREEMPT_RT - source adapter pending"); });
+                    ui.selectable_value(&mut selected_source, "linux-zen".into(), "Linux Zen - signed Zen patch + stable base");
+                    ui.selectable_value(&mut selected_source, "linux-cachyos".into(), "CachyOS - release source archive (explicit opt-in)");
+                    ui.selectable_value(&mut selected_source, "linux-tkg".into(), "Linux TKG - pinned curated EEVDF patches (explicit opt-in)");
+                    ui.selectable_value(&mut selected_source, "linux-rt".into(), "PREEMPT_RT - signed RT patch + exact base version");
                 });
             if selected_source != configured_source
                 && let Err(error) = self.set_profile_source(&selected_source)
@@ -1026,16 +1115,30 @@ impl KernelOptimizerApp {
                 self.log(format!("Could not change kernel source: {error:#}"));
             }
         });
-        if configured_source == "linux-lts" {
+        if matches!(configured_source.as_str(), "linux-cachyos" | "linux-tkg") {
+            let mut allow_unverified = toml::from_str::<toml::Value>(&self.profile_text)
+                .ok().and_then(|value| value.get("allow_unverified_sources").and_then(toml::Value::as_bool))
+                .unwrap_or(false);
+            if ui.checkbox(&mut allow_unverified, "Allow source builds without a trusted detached signature (not packageable)").changed()
+                && let Err(error) = self.set_profile_allow_unverified(allow_unverified)
+            {
+                self.log(format!("Could not update source trust opt-in: {error:#}"));
+            }
+            if !allow_unverified {
+                ui.label(RichText::new("Enable the explicit opt-in to build this source. The resulting provenance is marked unverified.").color(Color32::from_rgb(235, 191, 104)));
+            }
+        } else if configured_source == "linux-lts" {
             ui.label(RichText::new("LTS builds automatically resolve the latest longterm release from kernel.org.").color(Color32::from_rgb(125, 208, 161)));
-        } else if !matches!(configured_source.as_str(), "linux") {
-            ui.label(RichText::new("This source does not yet have an audited downloader/patch adapter and cannot be built.").color(Color32::from_rgb(235, 191, 104)));
+        } else if configured_source == "linux-zen" {
+            ui.label(RichText::new("Zen patch compatibility is resolved from the upstream release notes; both the base archive and patch signature are verified.").color(Color32::from_rgb(125, 208, 161)));
+        } else if configured_source == "linux-rt" {
+            ui.label(RichText::new("PREEMPT_RT uses the exact X.Y upstream base version for the latest signed RT patch in that series.").color(Color32::from_rgb(125, 208, 161)));
         }
 
         ui.add_space(8.0);
         Self::card(ui, |ui| {
             ui.heading("Before you build");
-            ui.label("Kernel builds can take hours and require substantial disk space. The builder verifies kernel.org signatures and stages output separately from the live boot path.");
+            ui.label("Kernel builds can take hours and require substantial disk space. Signed source tracks are verified; CachyOS and TKG require explicit opt-in and are marked unverified. Output is staged separately from the live boot path.");
             ui.horizontal(|ui| {
                 if ui.add_enabled(!self.running, egui::Button::new("Run doctor").fill(Color32::from_rgb(35, 105, 135))).clicked() {
                     self.run_doctor();
@@ -1552,6 +1655,22 @@ impl KernelOptimizerApp {
         ui.horizontal(|ui| {
             ui.label(if self.running { "Operation running" } else { "Idle" });
             ui.label(RichText::new(&self.status).color(if self.running { Color32::from_rgb(235, 191, 104) } else { Color32::from_rgb(125, 208, 161) }));
+            let log_text = self.logs.iter().cloned().collect::<Vec<_>>().join("\n");
+            if ui.add_enabled(!self.logs.is_empty(), egui::Button::new("Copy all")).clicked() {
+                ui.ctx().copy_text(log_text.clone());
+                self.status = format!("Copied {} log lines to clipboard", self.logs.len());
+            }
+            if ui.add_enabled(!self.logs.is_empty(), egui::Button::new("Save log...")).clicked()
+                && let Some(path) = FileDialog::new()
+                    .add_filter("Text log", &["log", "txt"])
+                    .set_file_name("kernel-optimizer-activity.log")
+                    .save_file()
+            {
+                match fs::write(&path, &log_text) {
+                    Ok(()) => self.status = format!("Saved activity log to {}", path.display()),
+                    Err(error) => self.status = format!("Could not save activity log: {error}"),
+                }
+            }
             if ui.button("Clear log").clicked() {
                 self.logs.clear();
             }
@@ -1562,13 +1681,14 @@ impl KernelOptimizerApp {
             }
         });
         ui.label(RichText::new(&self.current_command).small().monospace().color(Color32::GRAY));
+        ui.label(RichText::new("Log lines are selectable. Use Copy all or Save log... to share the complete output.").small().color(Color32::GRAY));
         ui.add_space(6.0);
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for line in &self.logs {
-                    ui.label(RichText::new(line).monospace().size(11.5));
+                    ui.add(egui::Label::new(RichText::new(line).monospace().size(11.5)).selectable(true));
                 }
             });
     }

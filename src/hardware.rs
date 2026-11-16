@@ -38,6 +38,7 @@ pub struct HardwareProfile {
     pub gpus: Vec<String>, pub network_controllers: Vec<String>,
     pub power_governors: Vec<String>, pub cpu_frequency_policies: Vec<CpuFreqPolicy>,
     pub current_cmdline: String,
+    pub boot: crate::boot::BootInventory,
 }
 fn read(path: impl AsRef<Path>) -> String { fs::read_to_string(path).unwrap_or_default() }
 fn cmd(program: &str, args: &[&str]) -> String {
@@ -200,6 +201,7 @@ pub fn detect() -> HardwareProfile {
         network_controllers: controller_lines("ethernet").into_iter().chain(controller_lines("network controller")).collect(),
         power_governors: power_governors(), cpu_frequency_policies: cpu_frequency_policies(),
         current_cmdline: read("/proc/cmdline").trim().into(),
+        boot: crate::boot::detect(),
     }
 }
 #[cfg(test)]
