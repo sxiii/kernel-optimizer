@@ -27,6 +27,52 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets
 
+  distro-smoke:
+    name: ${{ matrix.name }} compile, lint and test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debian testing
+            image: debian:testing
+            package_manager: apt
+          - name: Fedora
+            image: fedora:latest
+            package_manager: dnf
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native build dependencies (Debian)
+        if: matrix.package_manager == 'apt'
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential pkg-config git curl ca-certificates \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev \
+            libwayland-dev libegl1-mesa-dev libdbus-1-dev libssl-dev
+      - name: Install native build dependencies (Fedora)
+        if: matrix.package_manager == 'dnf'
+        shell: bash
+        run: |
+          dnf install -y gcc gcc-c++ make pkgconf-pkg-config git curl ca-certificates \
+            libxcb-devel libxkbcommon-devel libxkbcommon-x11-devel \
+            libX11-devel libX11-xcb-devel wayland-devel mesa-libEGL-devel \
+            dbus-devel openssl-devel
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: distro-${{ matrix.package_manager }}
+      - name: Compile, lint and run hardware-independent tests
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all-targets
+
   shell:
     name: ShellCheck and shfmt
     runs-on: ubuntu-latest
