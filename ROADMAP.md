@@ -33,12 +33,12 @@ project must never treat a staged or installed image as proof that a machine can
 - [x] Generate a reviewable Arch package build description from staged artifacts.
 - [x] Package modules, kernel image, System.map and config without invoking pacman.
 - [x] Detect conflicting staged/installed module directories and owned boot-image/preset files before package installation.
-- [ ] Test package build in a disposable clean Arch environment.
+- [x] Build and inspect a package in a clean Arch container as an unprivileged user; the test runs makepkg and validates the result with pacman.
 - [x] Keep package installation as a separate, explicit user action.
 
 ## Priority 4 — Bootability, signing and rollback
 
-- [ ] Detect the actual bootloader, EFI/BIOS mode, ESP, mount state and current boot entries.
+- [x] Detect firmware mode, standard bootloader installations, boot menu entries, EFI BootCurrent/Boot#### records, and mounted ESP/boot filesystems without mutation. Treat missing data conservatively in containers/custom layouts.
 - [x] Detect mkinitcpio/dracut and their active pacman hooks; package installation delegates
   initramfs generation to the detected distribution hook rather than invoking an ad-hoc command.
 - [x] Check Secure Boot state before Arch package installation and fail closed when enabled or
@@ -52,16 +52,17 @@ project must never treat a staged or installed image as proof that a machine can
 
 - [x] Add Linux Zen, CachyOS, TKG and PREEMPT_RT adapters with pinned patch sources,
   recorded hashes/signature state and explicit opt-in for unsigned CachyOS/TKG material.
-- [ ] Test supported paths on Arch/Garuda, Debian/Ubuntu and Fedora.
+- [ ] Run full kernel-build and tuning integration tests on Arch/Garuda, Debian/Ubuntu and Fedora. A separate app-level compile/lint/test smoke matrix is being added for Debian and Fedora.
 - [ ] Add hardware-specific benchmark suites only when their results are reproducible
   and their limitations are clearly reported.
 - [x] Add a native desktop GUI for every currently implemented CLI workflow, with command logs, JSON benchmark import/comparison charts, and privileged actions gated by PolicyKit.
 - [x] Connect the GUI Installation page to package creation and explicitly authorized pacman installation.
-- [ ] Add automated integration tests in a disposable clean Arch/Garuda environment; bootloader entry management and Secure Boot signing remain deliberately manual/unsupported.
+- [x] Add automated package-build integration tests in a disposable clean Arch environment; bootloader entry management and Secure Boot signing remain deliberately manual/unsupported.
 
 All six kernel source tracks have now been successfully built on the project maintainer's
-host. This is useful runtime validation of the source adapters, but it does not establish
-cross-distribution compatibility, reproducible builds or successful bootability.
+host. The Arch package CI builds a real package from synthetic staged fixtures as an
+unprivileged user. These checks do not establish cross-distribution kernel-build
+compatibility, reproducible builds or successful bootability.
 
 ## Explicit non-goals for the current milestone
 
