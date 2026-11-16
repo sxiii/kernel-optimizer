@@ -986,9 +986,9 @@ mod tests {
         let info = String::from_utf8_lossy(&package_info.stdout);
         let package_name = info.lines().find_map(|line| {
             let (key, value) = line.split_once(':')?;
-            (key.trim() == "Name").then(|| value.trim())
-        });
-        assert_eq!(package_name, Some(format!("linux-optimizer-{release}").as_str()));
+            (key.trim() == "Name").then(|| value.trim().to_owned())
+        }).unwrap_or_default();
+        assert_eq!(package_name, format!("linux-optimizer-{release}"));
         fs::remove_dir_all(root).unwrap();
     }
 }
