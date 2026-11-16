@@ -391,8 +391,8 @@ fn compare_reports(baseline: &BenchmarkReport, candidate: &BenchmarkReport) -> R
             output.push_str(&format!("{:<28} incompatible report metadata\n", old.name));
             continue;
         }
-        if old.median.abs() < f64::EPSILON {
-            if new.median.abs() < f64::EPSILON {
+        if old.median == 0.0 {
+            if new.median == 0.0 {
                 output.push_str(&format!(
                     "{:<28} {:>11.2} {:>11.2} {:>+10.2}% {:>20}\n",
                     old.name, old.median, new.median, 0.0, "similar"
