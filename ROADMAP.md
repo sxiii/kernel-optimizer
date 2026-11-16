@@ -52,7 +52,7 @@ project must never treat a staged or installed image as proof that a machine can
 
 - [x] Add Linux Zen, CachyOS, TKG and PREEMPT_RT adapters with pinned patch sources,
   recorded hashes/signature state and explicit opt-in for unsigned CachyOS/TKG material.
-- [ ] Run full kernel-build and tuning integration tests on Arch/Garuda, Debian/Ubuntu and Fedora. A separate app-level compile/lint/test smoke matrix is being added for Debian and Fedora.
+- [ ] Run full kernel-build and tuning integration tests on Arch/Garuda, Debian/Ubuntu and Fedora. Application-level compile/lint/test smoke jobs have passed on Debian and Fedora; they do not establish full kernel-build or tuning compatibility.
 - [ ] Add hardware-specific benchmark suites only when their results are reproducible
   and their limitations are clearly reported.
 - [x] Add a native desktop GUI for every currently implemented CLI workflow, with command logs, JSON benchmark import/comparison charts, and privileged actions gated by PolicyKit.
