@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 mod tuning;
 use tuning::Workload;
 mod hardware;
+mod boot;
 mod benchmark;
 mod recommendations;
 mod tui;
