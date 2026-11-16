@@ -307,22 +307,22 @@ fn apply_managed_files_with_reloader(
         };
     }
 
-    if udev_contents.contains("ACTION==") {
-        if let Err(error) = reload_udev() {
-            return match rollback_managed_files(
-                sysctl_path,
-                udev_path,
-                previous_sysctl.as_deref(),
-                previous_udev.as_deref(),
-                &mut reload_sysctl,
-                &mut reload_udev,
-            ) {
-                Ok(()) => Err(error).context("udev rule reload failed; restored the previous optimizer drop-ins"),
-                Err(rollback_error) => Err(error).context(format!(
-                    "udev rule reload failed and rollback reported an error: {rollback_error:#}"
-                )),
-            };
-        }
+    if udev_contents.contains("ACTION==")
+        && let Err(error) = reload_udev()
+    {
+        return match rollback_managed_files(
+            sysctl_path,
+            udev_path,
+            previous_sysctl.as_deref(),
+            previous_udev.as_deref(),
+            &mut reload_sysctl,
+            &mut reload_udev,
+        ) {
+            Ok(()) => Err(error).context("udev rule reload failed; restored the previous optimizer drop-ins"),
+            Err(rollback_error) => Err(error).context(format!(
+                "udev rule reload failed and rollback reported an error: {rollback_error:#}"
+            )),
+        };
     }
     Ok(())
 }
