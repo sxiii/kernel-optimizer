@@ -24,8 +24,7 @@ project must never treat a staged or installed image as proof that a machine can
 - [x] Write a machine-readable provenance manifest with kernel image, System.map and
   modules-tree hashes plus host/build metadata.
 - [x] Re-extract the verified archive on each build, preserving only the previous .config.
-- [ ] Add an end-to-end verification test using a test keyring and deliberately altered
-  archives/signatures; keep the test signer separate from the production allowlist.
+- [x] Add an end-to-end verification test using a temporary isolated GPG keyring and generated test signer; verify a valid archive and reject deliberately altered archive content. The test signer is separate from the production allowlist.
 - [ ] Add a documented maintenance procedure for reviewing signer-key revocations and
   updating the pinned fingerprint set from kernel.org's published source.
 
