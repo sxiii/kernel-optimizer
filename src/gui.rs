@@ -710,6 +710,79 @@ impl KernelOptimizerApp {
             Self::stat_card(&mut columns[2], "Storage devices", &devices.to_string(), "Block devices and volumes", Color32::from_rgb(125, 208, 161));
         });
 
+        let boot = self.hardware.as_ref().and_then(|value| value.get("boot"));
+        let firmware = boot.and_then(|value| value.get("firmware_mode"))
+            .and_then(serde_json::Value::as_str).unwrap_or("Refresh hardware to inspect firmware");
+        let bootloaders = boot.and_then(|value| value.get("detected_bootloaders"))
+            .and_then(serde_json::Value::as_array)
+            .map(|items| items.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join(", "))
+            .filter(|items| !items.is_empty()).unwrap_or_else(|| "None detected in standard paths".into());
+        let current_entry = boot.and_then(|value| value.get("current_boot_entry"))
+            .and_then(serde_json::Value::as_str).unwrap_or("Not identified");
+        let current_image = boot.and_then(|value| value.get("current_kernel_image"))
+            .and_then(serde_json::Value::as_str).unwrap_or("Not exposed in /proc/cmdline");
+        let esp = boot.and_then(|value| value.get("efi_system_partition"))
+            .filter(|value| !value.is_null())
+            .map(|value| format!(
+                "{} — {} ({})",
+                value["target"].as_str().unwrap_or("?"),
+                value["source"].as_str().unwrap_or("?"),
+                value["filesystem"].as_str().unwrap_or("?")
+            ))
+            .unwrap_or_else(|| "No mounted FAT ESP detected at standard mountpoints".into());
+        let boot_entries = boot.and_then(|value| value.get("boot_entries"))
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().take(8).map(|entry| {
+                let title = entry["title"].as_str().unwrap_or("Unnamed entry");
+                let marker = if entry["is_selected"].as_bool().unwrap_or(false) {
+                    " [selected]"
+                } else if entry["is_default"].as_bool().unwrap_or(false) {
+                    " [default]"
+                } else {
+                    ""
+                };
+                format!("{title}{marker}")
+            }).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let boot_notes = boot.and_then(|value| value.get("notes"))
+            .and_then(serde_json::Value::as_array)
+            .map(|notes| notes.iter().filter_map(serde_json::Value::as_str).map(str::to_owned).collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        ui.add_space(12.0);
+        Self::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Boot environment");
+                ui.label(RichText::new("Read-only").color(Color32::from_rgb(125, 208, 161)));
+            });
+            ui.columns(2, |columns| {
+                columns[0].label(RichText::new("Firmware").small().color(Color32::GRAY));
+                columns[0].label(RichText::new(firmware).strong());
+                columns[0].add_space(6.0);
+                columns[0].label(RichText::new("Detected bootloaders").small().color(Color32::GRAY));
+                columns[0].label(&bootloaders);
+                columns[1].label(RichText::new("Current boot entry").small().color(Color32::GRAY));
+                columns[1].label(current_entry);
+                columns[1].add_space(6.0);
+                columns[1].label(RichText::new("Running kernel image").small().color(Color32::GRAY));
+                columns[1].label(current_image);
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new("EFI System Partition").small().color(Color32::GRAY));
+            ui.label(&esp);
+            if !boot_entries.is_empty() {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Detected menu entries").small().color(Color32::GRAY));
+                for entry in &boot_entries {
+                    ui.label(entry);
+                }
+            }
+            for note in boot_notes.iter().take(2) {
+                ui.label(RichText::new(note).small().color(Color32::from_rgb(235, 191, 104)));
+            }
+            ui.label(RichText::new("This inventory does not modify boot entries, EFI variables or Secure Boot settings.").small().color(Color32::GRAY));
+        });
+
         ui.add_space(12.0);
         ui.columns(2, |columns| {
             Self::card(&mut columns[0], |ui| {
