@@ -60,7 +60,7 @@ jobs:
         run: |
           dnf install -y gcc gcc-c++ make pkgconf-pkg-config git curl ca-certificates \
             libxcb-devel libxkbcommon-devel libxkbcommon-x11-devel \
-            libX11-devel libX11-xcb-devel wayland-devel mesa-libEGL-devel \
+            libX11-devel wayland-devel mesa-libEGL-devel \
             dbus-devel openssl-devel
       - uses: dtolnay/rust-toolchain@stable
         with:
