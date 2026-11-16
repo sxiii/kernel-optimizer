@@ -93,6 +93,39 @@ fn hardware_lines(hw: &HardwareProfile) -> Vec<Line<'static>> {
         }
     }
     lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Boot environment (read-only)", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(format!("  Firmware: {}", hw.boot.firmware_mode)));
+    lines.push(Line::from(format!(
+        "  Detected bootloaders: {}",
+        if hw.boot.detected_bootloaders.is_empty() { "none in standard paths".into() } else { hw.boot.detected_bootloaders.join(", ") }
+    )));
+    lines.push(Line::from(format!(
+        "  Current entry: {}",
+        hw.boot.current_boot_entry.as_deref().unwrap_or("not identified")
+    )));
+    lines.push(Line::from(format!(
+        "  Running kernel image: {}",
+        hw.boot.current_kernel_image.as_deref().unwrap_or("not exposed in /proc/cmdline")
+    )));
+    if let Some(esp) = &hw.boot.efi_system_partition {
+        lines.push(Line::from(format!(
+            "  ESP: {} on {} ({})",
+            esp.target, esp.source, esp.filesystem
+        )));
+    } else {
+        lines.push(Line::from("  ESP: no mounted FAT ESP detected at standard mountpoints"));
+    }
+    if !hw.boot.boot_entries.is_empty() {
+        lines.push(Line::from("  Detected boot entries:"));
+        for entry in hw.boot.boot_entries.iter().take(12) {
+            let marker = if entry.is_selected { " [selected]" } else if entry.is_default { " [default]" } else { "" };
+            lines.push(Line::from(format!("    {}{}", entry.title, marker)));
+        }
+    }
+    for note in &hw.boot.notes {
+        lines.push(Line::from(format!("  Note: {note}")));
+    }
+    lines.push(Line::from(""));
     lines.push(Line::from(format!("Kernel command line: {}", hw.current_cmdline)));
     lines
 }
