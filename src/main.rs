@@ -175,8 +175,14 @@ fn ensure_archive_with(
     mut validate: impl FnMut(&Path) -> Result<()>,
     mut download: impl FnMut(&Path) -> Result<()>,
 ) -> Result<()> {
-    if archive.is_file() && validate(archive).is_ok() {
-        return Ok(());
+    if archive.is_file() {
+        if validate(archive).is_ok() {
+            return Ok(());
+        }
+        eprintln!(
+            "Cached archive {} failed integrity validation; downloading a fresh copy.",
+            archive.display()
+        );
     }
     if archive.exists() {
         fs::remove_file(archive)
@@ -214,12 +220,6 @@ fn ensure_kernel_archive(archive: &Path, url: &str) -> Result<()> {
         archive,
         |path| run_checked(Command::new("xz").arg("-t").arg(path)),
         |temporary| {
-            if archive.exists() {
-                eprintln!(
-                    "Cached kernel archive {} failed integrity testing; downloading a fresh copy.",
-                    archive.display()
-                );
-            }
             run_checked(
                 Command::new("curl")
                     .args(["--fail", "--location", "--retry", "3", "--silent", "--show-error", "--output"])
