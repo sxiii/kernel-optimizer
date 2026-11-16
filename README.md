@@ -1,6 +1,6 @@
 # Kernel Optimizer
 
-A Rust CLI prototype for inspecting Linux hardware, discovering the current upstream stable kernel, creating an explicit build profile, compiling a kernel and staging artifacts for review.
+A Rust application for inspecting Linux hardware, comparing kernel performance, tuning selected system settings, building and staging upstream/optimized kernels, and packaging reviewed builds for supported systems.
 
 > **Safety:** this project does not replace your running kernel or modify GRUB/systemd-boot. Build output is staged separately; Arch/Garuda package installation is a separate, explicitly authorized step. Bootloader entry creation and rollback automation remain disabled.
 
@@ -28,7 +28,7 @@ not automated.
 
 - [x] End-to-end kernel archive signature verification test using an isolated temporary GPG keyring, a generated test signer and a tampered-archive rejection case.
 - [x] Build and inspect a real pacman package in a clean Arch container as an unprivileged user (GitHub Actions).
-- [ ] Validate full kernel builds and tuning on Debian/Ubuntu and Fedora, plus additional supported kernel configurations. Application compile/lint/test smoke jobs are being added for Debian and Fedora.
+- [ ] Validate full kernel builds and tuning on Debian/Ubuntu and Fedora, plus additional supported kernel configurations. Application compile/lint/test smoke jobs have passed on Debian and Fedora; full kernel builds and tuning on those distributions are not yet validated.
 - [ ] Add module-signing support and a complete Secure Boot signing/enrollment workflow; current install checks fail closed when Secure Boot is enabled or uncertain.
 - [x] Detect firmware mode, standard bootloader installations, boot menu entries, EFI boot variables and mounted ESP/boot filesystems without changing them.\n- [ ] Design safe boot-entry creation with a preserved known-good fallback and tested rollback.
 - [ ] Add reproducible hardware-specific benchmark suites only where the workload and limitations can be documented.
