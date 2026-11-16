@@ -48,3 +48,29 @@ jobs:
           else
             echo "No shell scripts found; Rust checks cover the application."
           fi
+
+  arch-package-integration:
+    name: Arch package build integration
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clean Arch build environment
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm --needed \\
+            base-devel rust cargo mkinitcpio kmod \\
+            libxcb libx11 libxi libxrandr libxinerama libxcursor \\
+            libxkbcommon libxkbcommon-x11 wayland dbus mesa libglvnd pkgconf
+      - name: Create an unprivileged package builder
+        run: |
+          useradd --create-home --uid 1001 builder
+          chown -R builder:builder "$GITHUB_WORKSPACE" /home/builder
+      - name: Build and inspect a pacman package from staged test artifacts
+        run: |
+          runuser -u builder -- env \\
+            HOME=/home/builder \\
+            CARGO_HOME=/home/builder/.cargo \\
+            KERNEL_OPTIMIZER_RUN_ARCH_PACKAGE_INTEGRATION=1 \\
+            cargo test --all-targets arch_package::tests::arch_package_build_smoke_in_clean_environment -- --exact --nocapture
