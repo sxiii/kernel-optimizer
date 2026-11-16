@@ -244,10 +244,10 @@ fn detect_systemd_boot() -> (bool, Vec<BootEntry>) {
     ];
     let json = command_output("bootctl", &["--json=short", "list"]);
     let mut entries = json.as_deref().map(parse_systemd_boot_entries_json).unwrap_or_default();
-    if entries.is_empty() {
-        if let Some(text) = command_output("bootctl", &["list"]) {
-            entries = parse_systemd_boot_entries_text(&text);
-        }
+    if entries.is_empty()
+        && let Some(text) = command_output("bootctl", &["list"])
+    {
+        entries = parse_systemd_boot_entries_text(&text);
     }
     let status = command_output("bootctl", &["status"]).unwrap_or_default();
     let detected = path_exists_any(&loader_conf)
